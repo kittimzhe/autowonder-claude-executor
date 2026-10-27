@@ -1,9 +1,9 @@
 {
   "name": "autowonder-claude-executor",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Open-source AutoWonder community-edition executor powered by Claude Code (headless) — speaks the platform WebSocket executor protocol",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "engines": {
     "node": ">=22"
   },
@@ -26,5 +26,30 @@
     "@types/ws": "^8.5.13",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
-  }
+  },
+  "keywords": [
+    "autowonder",
+    "claude-code",
+    "executor",
+    "mcp",
+    "multi-agent",
+    "sdlc",
+    "websocket",
+    "ai-sdlc",
+    "daemon"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kittimzhe/autowonder-claude-executor.git"
+  },
+  "homepage": "https://github.com/kittimzhe/autowonder-claude-executor#readme",
+  "bugs": {
+    "url": "https://github.com/kittimzhe/autowonder-claude-executor/issues"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ]
 }

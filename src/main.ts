@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // awce — AutoWonder community-edition executor with a Claude Code engine.
 // Full pipeline: DISPATCH → ACK → capsule → prompt → agent → artifacts → RESULT (+HANDOFF).
 
@@ -252,4 +253,15 @@ function main(): void {
   client.start();
 }
 
-main();
+(async () => main())().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[awce] startup failed: ${message}`);
+  if (message.includes('environment variable')) {
+    console.error(`[awce] quick start:
+  AWCE_WS_URL=ws://127.0.0.1:7001/ws/executor \
+  AWCE_EXECUTOR_ID=<id> AWCE_EXECUTOR_TOKEN=<exec_...> \
+  AWCE_WORKSPACE_ROOT=/tmp/awce-runs npx autowonder-claude-executor
+See README.md for the full variable list.`);
+  }
+  process.exit(1);
+});
