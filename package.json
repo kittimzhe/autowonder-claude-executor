@@ -4,13 +4,19 @@
   "description": "Open-source AutoWonder community-edition executor powered by Claude Code (headless) — speaks the platform WebSocket executor protocol",
   "type": "module",
   "license": "Apache-2.0",
-  "engines": { "node": ">=22" },
-  "bin": { "awce": "dist/main.js" },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "awce": "dist/main.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "dev": "tsx src/main.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test",
+    "test:only": "node --test"
   },
   "dependencies": {
     "ws": "^8.18.0"

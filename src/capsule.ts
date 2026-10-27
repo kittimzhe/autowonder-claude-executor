@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { TaskDispatchFrame } from './frames.js';
+import { verifyDispatchSignature } from './signature.js';
 
 export interface CapsuleManifest {
   readonly schemaVersion: string; // autoWonder.taskPackage.v1
@@ -75,6 +76,14 @@ export async function buildCapsule(
   if (md5 !== frame.md5.toLowerCase()) {
     throw new Error(`package md5 mismatch: expected ${frame.md5}, got ${md5}`);
   }
+
+  // 2b. TASK_PACKAGE_SIGNATURE_V1: sha256 checksum + Ed25519 envelope verification.
+  const signature = verifyDispatchSignature(frame, zipBytes);
+  if (!signature.ok) {
+    throw new Error(`package signature rejected: ${signature.reason}`);
+  }
+  const signatureNote = signature.reason ?? 'verified (sha256:' + signature.archiveSha256.slice(0, 12) + '…)';
+  log(`signature check: ${signatureNote}`);
 
   // 3. Extract.
   await unzipInto(zipBytes, packageDir);

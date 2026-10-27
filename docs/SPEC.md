@@ -208,3 +208,14 @@ HEARTBEAT 不只是保活。不带 protocolFeatures 时走 legacy 路径（仅�
 awce 实现：单槽执行 `AWCE_MAX_CONCURRENT`（默认 1，声明容量仅用于协议合规），running=当前派发、owned=累计见过（最新 1000）。
 
 另发现：TASK_RESULT 有服务端回执帧 `TASK_RESULT_ACK {dispatchId, accepted}`（文档未写，靠未知帧日志捕获）。
+
+
+## M7 实测发现：任务包签名在社区版存在但未接线
+
+`TaskPackageSigner`（Ed25519、进程级密钥对、六行定长 payload）代码完整，但 `ObjectStorageConfig.taskPackager` bean 用**三参构造器**创建 TaskPackager——signer 从未注入，社区版 1.0.0 打出的包 `getSignature()==null`，`WsDispatchTransport` 直接跳过签名块（执行器声明特性与否都一样）。
+
+awce 的立场：**声明 TASK_PACKAGE_SIGNATURE_V1 + 收到即强校验**（向前兼容企业版接线，社区版无签名时放行并记录）。校验内容：
+1. `checksum`（sha256:zip 归档摘要）——社区版就带，直接硬校验
+2. 签名块：payload 六行逐字节重建 + Ed25519 验签 + `signatureRef` 钉死公钥（sha256(SPKI)）+ `expiresAt` 过期检查
+
+单测 `test/signature.test.mjs` 用 Node 原生 Ed25519 按服务端 Java 格式造签名，覆盖正例/篡改/过期/换钥四类（`npm test`）。

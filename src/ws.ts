@@ -112,8 +112,12 @@ export class WsClient {
     const heartbeat: Record<string, unknown> = { type: 'HEARTBEAT' };
     if (this.handlers.getVersion) heartbeat.version = this.handlers.getVersion();
     if (this.handlers.getModel) heartbeat.model = this.handlers.getModel();
+    // Capabilities declared on every heartbeat; the server gates frame content
+    // on them (e.g. the TASK_DISPATCH signature block only ships when
+    // TASK_PACKAGE_SIGNATURE_V1 is declared).
+    const features: string[] = ['TASK_PACKAGE_SIGNATURE_V1'];
     if (inventory) {
-      heartbeat.protocolFeatures = ['dispatch_inventory_v1'];
+      features.push('dispatch_inventory_v1');
       heartbeat.maxConcurrentDispatches = inventory.maxConcurrentDispatches;
       heartbeat.dispatchInventoryReady = inventory.dispatchInventoryReady;
       heartbeat.runningDispatchIds = [...inventory.runningDispatchIds];
@@ -121,6 +125,7 @@ export class WsClient {
       heartbeat.runningConversationTurnIds = [...inventory.runningConversationTurnIds];
       if (inventory.dispatchInventoryError !== undefined) heartbeat.dispatchInventoryError = inventory.dispatchInventoryError;
     }
+    heartbeat.protocolFeatures = features;
     return heartbeat as unknown as ClientFrame;
   }
 
