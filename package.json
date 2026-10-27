@@ -1,6 +1,6 @@
 {
   "name": "autowonder-claude-executor",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Open-source AutoWonder community-edition executor powered by Claude Code (headless) — speaks the platform WebSocket executor protocol",
   "type": "module",
   "license": "MIT",
