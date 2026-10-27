@@ -36,7 +36,7 @@ awce daemon ──▶ TASK_ACK / TASK_PROGRESS / TASK_RESULT / TASK_HANDOFF
 
 🚧 **M1–M4 已完成并端到端验证**（立项 2026-10-25）。路线图见 [docs/SPEC.md](docs/SPEC.md)。
 
-- [x] 协议精读与实现规格（[docs/PROTOCOL.md](docs/PROTOCOL.md)、[docs/SPEC.md](docs/SPEC.md)）
+- [x] 协议精读与实现规格（[docs/SPEC.md](docs/SPEC.md)）
 - [x] MCP 链路验证：Claude Code ↔ AutoWonder `/api/mcp` 端到端打通（112 工具）
 - [x] 最小 daemon：WS 接入 + TASK_DISPATCH/ACK/PROGRESS/RESULT 主环（平台显示 ONLINE）
 - [x] capsule：任务包下载/校验/解压（整包 md5 + 逐文件 sha256）
