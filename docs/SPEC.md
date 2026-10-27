@@ -1,0 +1,184 @@
+# awce 实现规格
+
+> 依据：AutoWonder 社区版 1.0.0 `docs/scheduler-executor-protocol.md`（462 行）+ `WsDispatchTransport.java` 源码实测 + 本地部署验证。
+> 目标：最小可用执行器，跑通"派发→执行→回传"主环。
+
+## 1. 运行模型
+
+```
+main.ts
+  └─ WsClient(url, executorId, token)         // 连接循环：指数退避 1s→×2→≤30s
+       ├─ 每 30s 发 HEARTBEAT（可选 protocolFeatures）
+       ├─ on TASK_DISPATCH → handleDispatch(frame)
+       │    ├─ ① sendTaskAck(dispatchId)                    // 立即 ACK（下载前）
+       │    ├─ ② Capsule.download(frame)                    // GET downloadUrl, md5 校验, 解压
+       │    ├─ ③ sendTaskProgress("capsule.ready")          // ACKED→RUNNING
+       │    ├─ ④ Runner.run(capsule, frame)                 // 拉起 Claude Code
+       │    │      ├─ 事件 → sendTaskProgress(resultSummary)
+       │    │      └─ 产出 artifacts/ 目录
+       │    ├─ ⑤ Artifacts.upload(frame, artifactsDir)      // HTTP 中转通道
+       │    ├─ ⑥ sendTaskResult(success, resultSummary, error)
+       │    └─ ⑦ handoff-proposal.json 存在 → sendTaskHandoff(...)
+       └─ on close/ping 异常 → 重连
+```
+
+关键顺序（协议硬约束）：
+- ACK 在下载之前（服务端 DISPATCHED→ACKED 只看帧，不看下载）；
+- TASK_PROGRESS 首帧会触发 ACKED→RUNNING；
+- TASK_RESULT 驱动 SdlcDriver 排下一棒，是唯一终态触发器；
+- TASK_HANDOFF 在 TASK_RESULT 之后发送（handoff 记录不阻塞主环）；
+- 同 dispatchId 幂等：重复 TASK_DISPATCH 忽略（防重复执行）。
+
+## 2. 配置（环境变量）
+
+| 变量 | 必填 | 说明 |
+|---|---|---|
+| `AWCE_WS_URL` | ✓ | 如 `ws://127.0.0.1:7001/ws/executor` |
+| `AWCE_EXECUTOR_ID` | ✓ | 平台签发的执行器 ID |
+| `AWCE_EXECUTOR_TOKEN` | ✓ | 平台签发的执行器 token（明文，随 WS query 传输） |
+| `AWCE_AGENT_BIN` | ✗ | Claude Code 可执行入口，默认 `node <claude-code-best>/dist/cli-node.js`（可指向官方 `claude`） |
+| `AWCE_AGENT_MODEL` | ✗ | 传给 agent 的 `--model`（中转部署需要，如 `GLM-5.1`） |
+| `AWCE_WORKSPACE_ROOT` | ✗ | capsule 根目录，默认 `~/.awce/capsules/` |
+| `AWCE_LOG_LEVEL` | ✗ | debug/info/warn/error，默认 info |
+
+## 3. TASK_DISPATCH 帧字段（源码 `WsDispatchTransport.buildFrame`，比协议文档多）
+
+```ts
+interface TaskDispatchFrame {
+  type: 'TASK_DISPATCH';
+  dispatchId: number; executorId: number; tenantId: number; workitemId: number;
+  agentId: number; agentVersionId: number; sdlcStepId: number; attempt: number;
+  downloadUrl: string;            // OSS presigned GET (600s)
+  md5: string; size: number;
+  packageId: string;              // "pkg_<dispatchId>"
+  checksum: string;               // "sha256:<hex>"（整包，Phase 2 才强校验）
+  checksumAlgorithm: 'sha256'; checksumScope: 'zip_archive';
+  // 包签名（TASK_PACKAGE_SIGNATURE_V1 能力位协商后才下发，MVP 跳过验签）
+  issuer?: string; signatureRef?: string; signature?: string;
+  signatureAlgorithm?: string; signaturePublicKey?: string; expiresAt?: string;
+  // 策略位
+  allowCommit: boolean; allowPush: boolean; allowNetwork: boolean;
+  // 现成 HTTP 通道（全部带 ?token=<executorToken> 鉴权）
+  packageRefreshPath: string;     // POST 刷新下载地址
+  artifactUploadPath: string;     // POST 产物上传（multipart）
+  checkpointUploadPath: string;   // POST checkpoint
+  memorySnapshotPath: string;     // 记忆快照/变更/召回（MVP 用 MCP 替代）
+  memoryChangesPath: string; memoryMutationPath: string; memoryRecallPath: string;
+  memoryStartingRevisions: Record<string, unknown>;
+  // ★ dispatch MCP 凭证：直接可注入 Claude Code mcp-config
+  dispatchMcpToken: string;       // awdispatch_…，24h TTL
+  debugLog?: { enabled: boolean; maxBytes: number };  // 需心跳声明 DEBUG_LOG_V1
+}
+```
+
+## 4. capsule（任务包）
+
+目录（解压到 `<AWCE_WORKSPACE_ROOT>/<tenantId>/<workitemId>/<dispatchId>/<attempt>/`）：
+
+```
+manifest.json          # schemaVersion=autoWonder.taskPackage.v1, fileDigests(每文件 sha256)
+workitem.md            # 工单标题+正文
+clarification.md?      # 澄清材料
+identity.json          # 数字员工身份 name/roleCode/职责/操作规则
+sdlc.json              # 当前 SDLC 步骤定义+产物契约+完成门
+skills.json + skills/<name>/SKILL.md
+repos.json             # 仓库+凭据/检出方式
+roster.json            # 队友（handoff 决策依据）
+memory/mem_id_<id>.md  # 记忆（注意：按 memoryId 命名，勿按序号构造路径）
+context/comments-index.json?  # 可选评论索引（autowonder.commentIndex.v1）
+context/comments/<id>.md?
+comments.md            # 聚合评论（legacy，始终存在）
+teammates/<role>/conclusion.md + artifacts/*
+```
+
+校验：整包 md5（帧字段）；逐文件 sha256（manifest.fileDigests，不含 manifest 自身）。
+
+## 5. Runner（Claude Code 无头执行）
+
+### 5.1 prompt 组装（prompt.ts）
+
+按材料渲染系统提示（英文指令 + 原文材料原样嵌入）：
+
+1. identity.json → "You are `<roleName>` (`<roleCode>`)… 职责/操作规则"
+2. sdlc.json 当前步 → "Your task for THIS step: `<stepName>` … 产物契约（期望产出文件清单）… 完成门"
+3. workitem.md + comments.md → 工单全文
+4. roster.json → 队友清单（供 handoff 决策）
+5. memory/*.md → 注入为参考记忆（≤50 条已在包内）
+6. teammates/*/conclusion.md → 上一轮结论
+7. 输出契约 → "完成后把交付物写入 `artifacts/deliverables/`；如需交接，写 `artifacts/handoff-proposal.json`（字段 nextOwner/nextRole/summary）"
+
+### 5.2 agent 拉起
+
+```sh
+node $CLAUDE_CODE_CLI -p "<prompt>" \
+  --mcp-config "<capsule>/mcp.config.json" \    # 渲染：autowonder → <server>/api/mcp + Bearer dispatchMcpToken
+  --allowedTools "mcp__autowonder__*" \
+  --model "$AWCE_AGENT_MODEL" \                 # 可选
+  --cwd "<capsule>/workspace"                    # 工作区：repo 检出 + artifacts 输出
+```
+
+mcp.config.json（我们生成）：
+```json
+{ "mcpServers": { "autowonder": {
+    "type": "http", "url": "http://<server>/api/mcp",
+    "headers": { "Authorization": "Bearer <dispatchMcpToken>" } } } }
+```
+
+### 5.3 事件→TASK_PROGRESS 映射
+
+ccb/claude 输出流（`--output-format stream-json`）逐事件转发：
+
+| agent 事件 | TASK_PROGRESS resultSummary |
+|---|---|
+| system init | `agent.started model=<model>` |
+| tool_use | `step.progress tool=<name>` |
+| 文本增量（节流 5s） | `step.progress chars=<n>` |
+| result | `agent.finished stop_reason=<reason>` |
+
+服务端只做幂等状态机推进 + 结构化展示（`stepOrder/stepId/stepName` 可选，MVP 先发字符串）。
+
+## 6. 产物上传（Artifacts）
+
+`POST <server><frame.artifactUploadPath>?token=<executorToken>`（multipart）：
+- `artifacts/deliverables/**` → artifactType=DELIVERABLE
+- `artifacts/handoff-proposal.json` → HANDOFF_PROPOSAL
+- `learning_delta/memory_delta.json`（如 agent 产出）→ LEARNING_DELTA
+
+（请求体格式以 `DaemonArtifactController` 实测为准——首个真实派发时抓包核对；协议文档 §5.8 提到 filesMetadata 带 sha256+sizeBytes、逐文件 ACCEPTED/REJECTED 回执。）
+
+## 7. 状态机（daemon 视角）
+
+```
+IDLE ─TASK_DISPATCH→ ACKING ─(send ACK)→ DOWNLOADING ─(md5 ok)→ MOUNTING
+    ─(capsule ready)→ RUNNING ─(agent exit 0)→ UPLOADING ─(upload ok)→ REPORTING
+    ─(send RESULT[+HANDOFF])→ IDLE
+任何阶段失败 → REPORTING(success=false, error=<阶段名+原因>) → IDLE
+```
+
+- WS 断线：执行中的 dispatch 继续跑完，RESULT 缓存待重连后补发（服务端按 dispatchId 幂等收敛）。
+- 进程被杀：服务端 onTimeout 兜底；重连后同 dispatchId 的重复 TASK_DISPATCH 忽略（attempt 不变）。
+
+## 8. MVP 边界（明确不做）
+
+- 包签名验证（TASK_PACKAGE_SIGNATURE_V1）——v1.1
+- 整包 sha256 强校验（服务端已下发 checksum，但文档标注 Phase 2 才强校验）——v1.1 可先做
+- debug log 上传（DEBUG_LOG_V1）——v1.2
+- checkpoint 上传 / memory HTTP 通道（用 MCP dispatch token 替代）
+- repos.json 的仓库检出（MVP：sdlc 步骤若不依赖 repo 则可空跑；repo 检出 v1.1）
+- Scheduled Task Run 特殊语义（线协议与工单一致，直接兼容，不做专门处理）
+
+## 9. 验证计划（本地 AutoWonder 1.0.0）
+
+1. **单元**：帧编解码、md5 校验、capsule 解压、prompt 渲染快照
+2. **集成**（需要本地栈）：注册执行器 → WS 在线 → 指派工单 → 观察平台状态机推进
+3. **端到端验收**：BugHunt-Lab 工作区创建一个真实缺陷工单 → SDLC 单步（agent handler）→ awce 完成 → 平台显示 SUCCEEDED + 产物可见 + handoff 记录
+
+## 10. 开发顺序
+
+| 阶段 | 内容 | 完成标志 |
+|---|---|---|
+| M1 | frames/config/ws（含重连+心跳） | WS 在线：平台执行器列表 ONLINE |
+| M2 | capsule（下载/校验/解压） | 收到真实 TASK_DISPATCH 并解出完整 capsule |
+| M3 | runner + prompt + mcp-config | Claude Code 拿到包材料跑完一步（日志可见） |
+| M4 | artifacts + result + handoff | 平台工单显示 SUCCEEDED，产物/交接记录可见 |
+| M5 | 验证记录 + README 快速开始 | 第三方可按文档复现 |
