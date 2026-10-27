@@ -32,7 +32,6 @@ const AWCE_VERSION = '0.3.0';
 
 /** Dispatches already seen in this process — protocol requires idempotency by dispatchId. */
 const seenDispatches = new Set<number>();
-let inFlight = false; // single-slot concurrency for the MVP
 
 /** Inventory state reported via HEARTBEAT (dispatch_inventory_v1). */
 const runningDispatches = new Set<number>();
@@ -45,12 +44,12 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
   }
   seenDispatches.add(frame.dispatchId);
   ownedDispatches.add(frame.dispatchId);
-  if (inFlight) {
-    // Honest single-slot rejection: the server will retry/stop per its onFail policy.
-    client.send({ type: 'TASK_RESULT', dispatchId: frame.dispatchId, success: false, resultSummary: 'awce busy', error: 'BUSY: single-slot MVP' });
-    return;
+  // Concurrency pool: the scheduler respects the maxConcurrentDispatches we
+  // declare in heartbeats; anything beyond it is best-effort (never dropped).
+  const busy = runningDispatches.size;
+  if (busy >= config.maxConcurrent) {
+    log('warn', `dispatch ${frame.dispatchId} exceeds declared capacity ${config.maxConcurrent} (running=${busy}); processing best-effort`);
   }
-  inFlight = true;
   runningDispatches.add(frame.dispatchId);
 
   const stage = (name: string) => log('info', `[d${frame.dispatchId}] ${name}`);
@@ -203,7 +202,6 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
     });
   } finally {
     runningDispatches.delete(frame.dispatchId);
-    inFlight = false;
   }
 }
 

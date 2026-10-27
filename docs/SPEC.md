@@ -241,3 +241,10 @@ attempt 1 强杀（kill -9，检查点 seq=1 已上传）→ 执行器重启（�
 3. **失败信号在 `errors[]` 数组且 exit=0**：resume 失败时 stream-json 返回 `{"type":"result","is_error":true,"errors":["No conversation found …"]}`——没有 `result` 字段、进程正常退出。解析器必须读 `errors[]`，否则失败原因丢失。
 4. **awce 降级策略**：先按协议尝试 `--resume`（frame.resumeSessionId），检测到会话类快速失败（errors[] 含 conversation/session）即自动换新会话重跑，连续性由 M8 检查点文本注入兜底。已实测完整链：kill -9 → 恢复派发 → resume 尝试 → 秒败捕获 → 降级重跑 → 按真实检查点内容交付 → V2 accepted。
 5. **engine session 即时钉存**：stream-json init 帧的 session_id 在引擎启动 ~1 秒内即可拿到，awce 当场上传 `agent-started` 检查点（providerSessionId=真实引擎会话）——此后任意时刻崩溃，恢复派发都会带上该会话 id。注意回调与后续检查点需从同一原子计数器取 seq（曾因两者同用 seq=2 导致 409 冲突）。
+
+
+## M10 实测发现：并发容量语义
+
+1. **声明容量 ≠ 可用容量**：`ExecutorSelector.capacityLimit` 对非交互（正式 SDLC）派发取 `maxConcurrentDispatches − 1`（为交互/恢复工作预留 1 槽）；`usedCapacity` = 库存表 running ∪ DB 占用 + 会话轮次。要 N 路正式并行须声明 N+1。实测：声明 2 时两工单严格串行（NO_EXECUTOR_CAPACITY），声明 3 后两个派发 44ms 内并发到达、运行重叠。
+2. **awce 并发模型**：单槽 inFlight 布尔改为 runningDispatches 集合池；超声明容量的派发 best-effort 处理（记警告、不丢工作——执行器丢派发没有服务端补偿路径）。
+3. **心跳库存是租约事实源**：服务端 `usedCapacity` 同时参考 DB 占用与最新快照 running 并集——执行器少报会误判容量，多报违反协议（RUNNING_DISPATCH_NOT_OWNED 断连）。
