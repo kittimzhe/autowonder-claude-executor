@@ -58,6 +58,9 @@ export class WsClient {
     socket.on('open', () => {
       this.backoffMs = BACKOFF_INITIAL_MS;
       this.handlers.onStateChange?.('online');
+      // Immediate heartbeat: the platform's executor list derives ONLINE from
+      // the persisted heartbeat timestamp, not from the WS session itself.
+      this.send({ type: 'HEARTBEAT' });
       this.flushPending();
       this.startHeartbeat();
     });
