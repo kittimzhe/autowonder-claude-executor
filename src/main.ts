@@ -2,6 +2,7 @@
 // Full pipeline: DISPATCH → ACK → capsule → prompt → agent → artifacts → RESULT (+HANDOFF).
 
 import { authenticatedWsUrl, httpBase, loadConfig, type AwceConfig } from './config.js';
+import type { Capsule } from './capsule.js';
 import { buildCapsule, writeMcpConfig } from './capsule.js';
 import { buildPrompt } from './prompt.js';
 import { readHandoffProposal, runAgent } from './runner.js';
@@ -9,7 +10,7 @@ import { uploadArtifacts } from './artifacts.js';
 import { downloadCheckpoint, uploadCheckpoint } from './checkpoint.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { WsClient } from './ws.js';
 import type { TaskDispatchFrame } from './frames.js';
@@ -90,16 +91,47 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
       state: { phase: 'context-ready', attempt: frame.attempt, promptChars: prompt.length, resumed: Boolean(resumeNote) },
     }).then((r) => stage(`recovery checkpoint seq=${r.checkpointSeq} (${r.sizeBytes}B)`));
 
-    const result = await runAgent(capsule, prompt, {
+    // Stable session workspace: retries of the same step run the engine from the
+    // SAME cwd so a native --resume finds the dead attempt's conversation.
+    const sessionRoot = capsule.sessionDir;
+    const sessionArtifacts = join(sessionRoot, 'artifacts');
+    await rm(sessionArtifacts, { recursive: true, force: true });
+    const sessionCapsule: Capsule = { ...capsule, root: sessionRoot, workspaceDir: join(sessionRoot, 'workspace'), artifactsDir: sessionArtifacts };
+
+    const runOnce = (resumeSessionId: string | undefined) => runAgent(sessionCapsule, prompt, {
       agentBin: config.agentBin,
       agentModel: config.agentModel,
       mcpConfigPath,
       timeoutMs: 30 * 60 * 1000,
       onProgress: progress,
+      resumeSessionId,
+      onSessionId: (sessionId) => {
+        // Persist the REAL engine session id immediately: a crash past this
+        // point lets recovery chain --resume onto this very conversation.
+        void uploadCheckpoint(frame, httpBase(config), config.executorToken, {
+          seq: nextSeq++, provider: 'claude-code', providerSessionId: sessionId, runtimeId: 'awce',
+          activeStepId: String(frame.sdlcStepId),
+          state: { phase: 'agent-started', attempt: frame.attempt, engineSession: sessionId },
+        }).then((r) => stage(`engine session ${sessionId} pinned (checkpoint seq=${r.checkpointSeq})`));
+      },
     });
+
+    // Native --resume first; some engines (e.g. custom builds) never persist
+    // headless conversations, so a fast resume failure falls back to a fresh
+    // session — continuity then comes from the injected checkpoint text.
+    if (frame.resumeSessionId) stage(`native session resume: ${frame.resumeSessionId} (behavior=${frame.resumeSessionBehavior ?? '?'})`);
+    let result = await runOnce(frame.resumeSessionId ?? undefined);
+    if (frame.resumeSessionId && !result.success) {
+      const resumeBroke = /conversation|session/i.test(`${result.error ?? ''}`);
+      if (resumeBroke) {
+        stage(`native resume unavailable on this engine (${(result.error ?? '').slice(0, 120)}); retrying fresh + checkpoint context`);
+        result = await runOnce(undefined);
+      }
+    }
+
     // Agent-controlled failure signal: writing artifacts/FAILURE marks the step failed
     // (headless exit codes alone cannot express "the WORK failed, not the process").
-    const failureMarker = join(capsule.artifactsDir, 'FAILURE');
+    const failureMarker = join(sessionCapsule.artifactsDir, 'FAILURE');
     let agentSuccess = result.success;
     let failureReason = result.error;
     if (existsSync(failureMarker)) {
@@ -116,12 +148,12 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
       state: { phase: 'agent-done', attempt: frame.attempt, success: agentSuccess, summary: result.summary.slice(0, 400) },
     }).then((r) => stage(`recovery checkpoint seq=${r.checkpointSeq} (${r.sizeBytes}B)`));
 
-    const upload = await uploadArtifacts(frame, httpBase(config), config.executorToken, capsule.artifactsDir, (m) => stage(`artifacts: ${m}`));
+    const upload = await uploadArtifacts(frame, httpBase(config), config.executorToken, sessionCapsule.artifactsDir, (m) => stage(`artifacts: ${m}`));
 
     // Community edition note: SdlcDriver.onSuccess is a stub (always stop) and the
     // packaged sdlc.json omits onSuccess — TASK_HANDOFF is THE relay mechanism, so
     // any agent-written proposal is sent unconditionally.
-    const handoff = await readHandoffProposal(capsule);
+    const handoff = await readHandoffProposal(sessionCapsule);
     if (handoff) stage(`handoff proposal: to=${handoff.to} (${handoff.toType})`);
 
     // V2 result with COMPLETION checkpoint: durable identity + idempotent replay.

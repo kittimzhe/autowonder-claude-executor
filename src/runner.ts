@@ -13,12 +13,17 @@ export interface RunnerOptions {
   readonly mcpConfigPath: string;
   readonly timeoutMs: number;         // step budget, from the dispatch/step config
   readonly onProgress: (summary: string) => void;
+  /** Native engine session to continue (Claude Code --resume). */
+  readonly resumeSessionId: string | undefined;
+  /** Fires as soon as the engine reports its session id (stream-json init). */
+  readonly onSessionId: ((sessionId: string) => void) | undefined;
 }
 
 export interface RunnerResult {
   readonly success: boolean;
   readonly summary: string;
   readonly error: string | undefined;
+  readonly sessionId: string | undefined;
 }
 
 /** Optional alternative engine: a local Claude Code build runnable via `node <cli.js>`. */
@@ -56,11 +61,18 @@ export async function runAgent(capsule: Capsule, prompt: string, options: Runner
     '--mcp-config', options.mcpConfigPath,
     '--allowedTools', 'mcp__autowonder__* Read Write Edit Bash LS Grep Glob',
     '--permission-mode', 'bypassPermissions',
-    '--output-format', 'text',
+    // stream-json gives us the engine session id up front (for crash-resume
+    // via --resume) plus structured progress and a machine-readable result.
+    '--output-format', 'stream-json',
+    '--verbose',
   ];
+  if (options.resumeSessionId) args.push('--resume', options.resumeSessionId);
   if (options.agentModel) args.push('--model', options.agentModel);
 
-  options.onProgress(`agent.started bin=${command} model=${options.agentModel ?? 'default'}`);
+  options.onProgress(
+    `agent.started bin=${command} model=${options.agentModel ?? 'default'}`
+    + (options.resumeSessionId ? ` resume=${options.resumeSessionId}` : ''));
+
 
   return await new Promise<RunnerResult>((resolve) => {
     const child = spawn(command, args, {
@@ -69,10 +81,47 @@ export async function runAgent(capsule: Capsule, prompt: string, options: Runner
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    let stdout = '';
+    let stdout = '';          // raw fallback when no parsable result event
     let stderr = '';
+    let stdoutTail = '';      // line buffer for stream-json events
+    let sessionId: string | undefined;
+    let resultText: string | undefined;
+    let resultIsError = false;
+    let resultErrors = '';
     const startedAt = Date.now();
     let lastProgressAt = 0;
+
+    const consumeLine = (line: string) => {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) return;
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(trimmed) as Record<string, unknown>;
+      } catch {
+        return; // engine banner / non-JSON noise
+      }
+      if (typeof event.session_id === 'string' && sessionId === undefined) {
+        sessionId = event.session_id;
+        options.onSessionId?.(sessionId);
+      }
+      if (event.type === 'assistant') {
+        const message = event.message as { content?: Array<{ type?: string; text?: string }> } | undefined;
+        const text = message?.content?.find((part) => part.type === 'text')?.text;
+        if (text && Date.now() - lastProgressAt > 5_000) {
+          lastProgressAt = Date.now();
+          options.onProgress(`agent.turn ${text.slice(0, 120).replace(/\s+/g, ' ')}`);
+        }
+      }
+      if (event.type === 'result') {
+        if (typeof event.result === 'string') resultText = resultText ?? event.result;
+        if (event.is_error === true) resultIsError = true;
+        // Engines report early failures (e.g. --resume target missing) on the
+        // result event's errors[] with exit code 0 — surface them verbatim.
+        if (Array.isArray(event.errors)) {
+          resultErrors = event.errors.filter((e) => typeof e === 'string').join('; ').slice(0, 500);
+        }
+      }
+    };
 
     const timer = setTimeout(() => {
       options.onProgress('agent.timeout budget exceeded, killing');
@@ -80,35 +129,41 @@ export async function runAgent(capsule: Capsule, prompt: string, options: Runner
     }, options.timeoutMs);
 
     child.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
-      if (Date.now() - lastProgressAt > 5_000) {
-        lastProgressAt = Date.now();
-        options.onProgress(`agent.running stdoutBytes=${stdout.length}`);
-      }
+      const text = chunk.toString('utf8');
+      stdout += text;
+      stdoutTail += text;
+      const lines = stdoutTail.split('\n');
+      stdoutTail = lines.pop() ?? '';
+      for (const line of lines) consumeLine(line);
     });
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString('utf8');
     });
     child.on('error', (error) => {
       clearTimeout(timer);
-      resolve({ success: false, summary: `agent spawn failed: ${error.message}`, error: error.message });
+      resolve({ success: false, summary: `agent spawn failed: ${error.message}`, error: error.message, sessionId });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      consumeLine(stdoutTail); // final unterminated event, if any
       const durationS = Math.round((Date.now() - startedAt) / 1000);
-      if (code === 0) {
-        options.onProgress(`agent.finished exit=0 duration=${durationS}s`);
+      if (code === 0 && !resultIsError) {
+        options.onProgress(`agent.finished exit=0 duration=${durationS}s session=${sessionId ?? '?'}`);
         resolve({
           success: true,
-          summary: (stdout.trim() || 'agent completed with no output').slice(0, 2000),
+          summary: (resultText ?? stdout.trim() ?? '').slice(0, 2000) || 'agent completed with no output',
           error: undefined,
+          sessionId,
         });
       } else {
-        options.onProgress(`agent.finished exit=${code} duration=${durationS}s`);
+        options.onProgress(`agent.finished exit=${code} duration=${durationS}s session=${sessionId ?? '?'}`);
         resolve({
           success: false,
-          summary: (stdout.trim() || '').slice(0, 1000),
-          error: `agent exited ${code}: ${stderr.trim().slice(0, 500)}`,
+          summary: (resultText ?? stdout.trim() ?? '').slice(0, 1000),
+          error: resultIsError
+            ? (resultErrors || `agent reported error: ${(resultText ?? '').slice(0, 500)}`)
+            : `agent exited ${code}: ${stderr.trim().slice(0, 500)}`,
+          sessionId,
         });
       }
     });

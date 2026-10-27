@@ -232,3 +232,12 @@ awce 的立场：**声明 TASK_PACKAGE_SIGNATURE_V1 + 收到即强校验**（向
 ## 已验证的崩溃恢复全链路（工单 10014，实杀进程）
 
 attempt 1 强杀（kill -9，检查点 seq=1 已上传）→ 执行器重启（空 owned 库存）→ 心跳对账 + 120s 宽限 → 替代派发 d10016 attempt=2（resumeMode=RECOVERY + 签名检查点 URL）→ awce 下载并 sha256 校验检查点 → 注入 prompt 的 Resume context → agent 按真实检查点内容（phase=context-ready）交付 → V2 结果 accepted=true。
+
+
+## M9 实测发现：原生会话续跑（providerSessionId → --resume）
+
+1. **会话按 cwd 归档**：Claude Code 系引擎把会话存在 `~/.claude/projects/<编码后的cwd>/<sessionId>.jsonl`，跨目录 `--resume` 直接 "No conversation found"。awce 为每个（工单, 步骤）维护稳定会话工作区 `session-<stepId>/`，同步骤重试共享同一 cwd——引擎支持持久化时原生续跑开箱即用。
+2. **定制引擎可能不落盘无头会话**：实测 ccb 2.4.0 在 `-p` 模式从不写会话文件（交互模式才写），`--resume` 必败。
+3. **失败信号在 `errors[]` 数组且 exit=0**：resume 失败时 stream-json 返回 `{"type":"result","is_error":true,"errors":["No conversation found …"]}`——没有 `result` 字段、进程正常退出。解析器必须读 `errors[]`，否则失败原因丢失。
+4. **awce 降级策略**：先按协议尝试 `--resume`（frame.resumeSessionId），检测到会话类快速失败（errors[] 含 conversation/session）即自动换新会话重跑，连续性由 M8 检查点文本注入兜底。已实测完整链：kill -9 → 恢复派发 → resume 尝试 → 秒败捕获 → 降级重跑 → 按真实检查点内容交付 → V2 accepted。
+5. **engine session 即时钉存**：stream-json init 帧的 session_id 在引擎启动 ~1 秒内即可拿到，awce 当场上传 `agent-started` 检查点（providerSessionId=真实引擎会话）——此后任意时刻崩溃，恢复派发都会带上该会话 id。注意回调与后续检查点需从同一原子计数器取 seq（曾因两者同用 seq=2 导致 409 冲突）。

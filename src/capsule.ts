@@ -19,6 +19,10 @@ export interface CapsuleManifest {
 
 export interface Capsule {
   readonly root: string;
+  /** Stable per-(workitem, step) dir shared across attempts: native engine
+   *  sessions are keyed by cwd, so retries must run from the SAME directory
+   *  for Claude Code --resume to find the dead attempt's conversation. */
+  readonly sessionDir: string;
   readonly packageDir: string;
   readonly workspaceDir: string;
   readonly artifactsDir: string;
@@ -54,6 +58,7 @@ export async function buildCapsule(
   log: (message: string) => void,
 ): Promise<Capsule> {
   const root = join(workspaceRoot, String(frame.tenantId), String(frame.workitemId), String(frame.dispatchId), `attempt-${frame.attempt}`);
+  const sessionDir = join(workspaceRoot, String(frame.tenantId), String(frame.workitemId), `session-${frame.sdlcStepId}`);
   const packageDir = join(root, 'package');
   const workspaceDir = join(root, 'workspace');
   const artifactsDir = join(root, 'artifacts');
@@ -116,7 +121,7 @@ export async function buildCapsule(
   }
   log(`capsule ready: ${verified}/${Object.keys(digests).length} file digests verified`);
 
-  return { root, packageDir, workspaceDir, artifactsDir, manifest };
+  return { root, sessionDir, packageDir, workspaceDir, artifactsDir, manifest };
 }
 
 /** Render the per-dispatch MCP config for the agent process. */
