@@ -219,3 +219,16 @@ awce 的立场：**声明 TASK_PACKAGE_SIGNATURE_V1 + 收到即强校验**（向
 2. 签名块：payload 六行逐字节重建 + Ed25519 验签 + `signatureRef` 钉死公钥（sha256(SPKI)）+ `expiresAt` 过期检查
 
 单测 `test/signature.test.mjs` 用 Node 原生 Ed25519 按服务端 Java 格式造签名，覆盖正例/篡改/过期/换钥四类（`npm test`）。
+
+
+## M8 实测发现：检查点/恢复的社区版真实语义
+
+1. **onFail RETRY 同样被社区版存根挡住**（SdlcDriver.onFail 恒 stop）——服务端自动重试是企业版能力。社区版的恢复路径是**运行时对账**：执行器心跳上报 owned 清单，`DispatchRuntimeReconciler` 发现"ACKED/RUNNING 但未报 owned"→ `recoverAbandonedExecution` 生成替代派发（attempt+1、resumeMode=RECOVERY、resumeFromDispatchId 链回死掉那次）。有 **120 秒自愈宽限**（快照上报时间须晚于派发修改时间+120s）。
+2. **resume 字段是扁平的**：TaskDispatchFrame.java 用 `resumeMode/resumeCheckpointUrl/resumeCheckpointSha256/resumeFromDispatchId/resumeCheckpointSeq` 等平铺字段（非嵌套对象），且后端日志 `dispatch urls … resumeCheckpointUrl=…` 可直接对照。
+3. **检查点保留策略**：每次 store 后 prune，仅保留最新 RETAIN_CHECKPOINTS 条（实测 2 条）——早期 seq 会被清理，恢复用最新存活检查点。
+4. **V2 结果与 COMPLETION 检查点**：服务端仅当 `matchesCompletionReceipt(resultId, checkpointSeq, sha256)` 匹配才接受 V2 成功结果；检查点 blob 内容对服务端不透明（LegacyCheckpointNormalizer 对非 tar.gz 报 ZipException 仅告警）。
+5. **agent 失败信号**：无头退出码无法表达"工作失败而进程正常"，awce 约定 `artifacts/FAILURE` 标记文件。
+
+## 已验证的崩溃恢复全链路（工单 10014，实杀进程）
+
+attempt 1 强杀（kill -9，检查点 seq=1 已上传）→ 执行器重启（空 owned 库存）→ 心跳对账 + 120s 宽限 → 替代派发 d10016 attempt=2（resumeMode=RECOVERY + 签名检查点 URL）→ awce 下载并 sha256 校验检查点 → 注入 prompt 的 Resume context → agent 按真实检查点内容（phase=context-ready）交付 → V2 结果 accepted=true。

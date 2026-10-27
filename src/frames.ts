@@ -73,6 +73,26 @@ export interface TaskDispatchFrame {
   readonly dispatchMcpToken: string;
   /** Only present when negotiated via HEARTBEAT protocolFeatures. */
   readonly debugLog?: { readonly enabled: boolean; readonly maxBytes: number };
+  /** Resume block — FLAT wire fields (not a nested object), present when this
+   *  dispatch resumes a dead/interrupted predecessor. */
+  readonly resumeMode?: string;
+  readonly resumeSessionBehavior?: string;
+  readonly resumeFromDispatchId?: number;
+  readonly resumeProvider?: string;
+  readonly resumeSessionId?: string;
+  readonly resumeCheckpointUrl?: string;
+  readonly resumeCheckpointSha256?: string;
+  readonly resumeCheckpointSeq?: number;
+  readonly resumeCheckpointCandidates?: readonly ResumeCheckpointCandidate[];
+}
+
+/** Checkpoint pointer carried on TASK_DISPATCH.resumeCheckpointCandidates. */
+export interface ResumeCheckpointCandidate {
+  readonly checkpointSeq: number;
+  readonly sha256?: string;
+  readonly provider?: string;
+  readonly providerSessionId?: string;
+  readonly sizeBytes?: number;
 }
 
 /** UP: executor → server. ACK must precede download. */
@@ -92,13 +112,23 @@ export interface TaskProgressFrame {
   readonly resultSummary: string;
 }
 
-/** UP: terminal for a dispatch; drives SdlcDriver next-step decision. */
+/** UP: terminal for a dispatch; drives SdlcDriver next-step decision.
+ * V2 (resultProtocolVersion: 2) adds a client-generated resultId (UUID) plus the
+ * COMPLETION-checkpoint pin (checkpointSeq + checkpointSha256) — the server only
+ * accepts V2 SUCCESS results that pin a matching COMPLETION checkpoint, and
+ * replays idempotently on (dispatchId, resultId) + payload hash. */
 export interface TaskResultFrame {
   readonly type: 'TASK_RESULT';
   readonly dispatchId: number;
   readonly success: boolean;
   readonly resultSummary: string;
   readonly error?: string;
+  /** UUID v4 string; required for V2. */
+  readonly resultId?: string;
+  readonly resultProtocolVersion?: number;
+  /** From the COMPLETION checkpoint receipt; required for V2 success. */
+  readonly checkpointSeq?: number;
+  readonly checkpointSha256?: string;
   readonly debugLog?: {
     readonly status: 'UPLOADED' | 'FAILED';
     readonly channel?: 'DIRECT' | 'RELAY';

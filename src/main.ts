@@ -6,6 +6,11 @@ import { buildCapsule, writeMcpConfig } from './capsule.js';
 import { buildPrompt } from './prompt.js';
 import { readHandoffProposal, runAgent } from './runner.js';
 import { uploadArtifacts } from './artifacts.js';
+import { downloadCheckpoint, uploadCheckpoint } from './checkpoint.js';
+import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { WsClient } from './ws.js';
 import type { TaskDispatchFrame } from './frames.js';
 
@@ -57,8 +62,33 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
     const mcpConfigPath = await writeMcpConfig(capsule, httpBase(config), frame.dispatchMcpToken);
     stage(`mcp-config ready (${mcpConfigPath})`);
 
-    const prompt = await buildPrompt(capsule);
+    // Resume context: a recovery dispatch carries the dead attempt's checkpoint
+    // as FLAT wire fields (resumeCheckpointUrl/…, per TaskDispatchFrame.java).
+    let resumeNote = '';
+    if (frame.resumeCheckpointUrl) {
+      try {
+        const blob = await downloadCheckpoint(frame.resumeCheckpointUrl, frame.resumeCheckpointSha256);
+        resumeNote = `\n\n---\n\n## Resume context (attempt ${frame.attempt}, mode=${frame.resumeMode ?? '?'}, restored from checkpoint seq ${frame.resumeCheckpointSeq ?? '?'} of dispatch ${frame.resumeFromDispatchId ?? frame.dispatchId})\n${blob.toString('utf8').slice(0, 4000)}`;
+        stage(`resumed from checkpoint seq=${frame.resumeCheckpointSeq} source=d${frame.resumeFromDispatchId ?? '?'} (${blob.length}B)`);
+      } catch (error) {
+        stage(`resume checkpoint unavailable, starting fresh: ${(error as Error).message}`);
+      }
+    } else if (frame.attempt > 1) {
+      stage('retry attempt without resume checkpoint; starting fresh');
+    }
+
+    let prompt = await buildPrompt(capsule);
+    prompt += `\n\n---\n\n## Execution metadata\n- Current attempt: ${frame.attempt}${resumeNote}`;
     stage(`prompt assembled (${prompt.length} chars)`);
+
+    // RECOVERY checkpoint #1: context assembled — a crash beyond this point can resume cheaply.
+    const runId = `awce-d${frame.dispatchId}-a${frame.attempt}`;
+    let nextSeq = 1;
+    await uploadCheckpoint(frame, httpBase(config), config.executorToken, {
+      seq: nextSeq++, provider: 'claude-code', providerSessionId: runId, runtimeId: 'awce',
+      activeStepId: String(frame.sdlcStepId),
+      state: { phase: 'context-ready', attempt: frame.attempt, promptChars: prompt.length, resumed: Boolean(resumeNote) },
+    }).then((r) => stage(`recovery checkpoint seq=${r.checkpointSeq} (${r.sizeBytes}B)`));
 
     const result = await runAgent(capsule, prompt, {
       agentBin: config.agentBin,
@@ -67,7 +97,24 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
       timeoutMs: 30 * 60 * 1000,
       onProgress: progress,
     });
-    stage(`agent done success=${result.success}`);
+    // Agent-controlled failure signal: writing artifacts/FAILURE marks the step failed
+    // (headless exit codes alone cannot express "the WORK failed, not the process").
+    const failureMarker = join(capsule.artifactsDir, 'FAILURE');
+    let agentSuccess = result.success;
+    let failureReason = result.error;
+    if (existsSync(failureMarker)) {
+      agentSuccess = false;
+      failureReason = (await readFile(failureMarker, 'utf8').catch(() => '')).trim().slice(0, 300) || 'agent signaled FAILURE';
+      stage(`agent signaled FAILURE: ${failureReason}`);
+    }
+    stage(`agent done success=${agentSuccess}`);
+
+    // RECOVERY checkpoint #2: agent finished — captures the expensive part of the run.
+    await uploadCheckpoint(frame, httpBase(config), config.executorToken, {
+      seq: nextSeq++, provider: 'claude-code', providerSessionId: runId, runtimeId: 'awce',
+      activeStepId: String(frame.sdlcStepId),
+      state: { phase: 'agent-done', attempt: frame.attempt, success: agentSuccess, summary: result.summary.slice(0, 400) },
+    }).then((r) => stage(`recovery checkpoint seq=${r.checkpointSeq} (${r.sizeBytes}B)`));
 
     const upload = await uploadArtifacts(frame, httpBase(config), config.executorToken, capsule.artifactsDir, (m) => stage(`artifacts: ${m}`));
 
@@ -77,14 +124,28 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
     const handoff = await readHandoffProposal(capsule);
     if (handoff) stage(`handoff proposal: to=${handoff.to} (${handoff.toType})`);
 
+    // V2 result with COMPLETION checkpoint: durable identity + idempotent replay.
+    const resultId = randomUUID();
+    const success = agentSuccess && upload.ok;
+    const completion = await uploadCheckpoint(frame, httpBase(config), config.executorToken, {
+      seq: nextSeq++, provider: 'claude-code', providerSessionId: runId, runtimeId: 'awce',
+      activeStepId: String(frame.sdlcStepId), purpose: 'COMPLETION', resultId,
+      state: { phase: 'completed', attempt: frame.attempt, success, artifactsAccepted: upload.receipts.filter((r) => r.status === 'ACCEPTED').length },
+    });
+    stage(`completion checkpoint seq=${completion.checkpointSeq} resultId=${resultId}`);
+
     client.send({
       type: 'TASK_RESULT',
       dispatchId: frame.dispatchId,
-      success: result.success && upload.ok,
+      resultId,
+      resultProtocolVersion: 2,
+      checkpointSeq: completion.checkpointSeq,
+      checkpointSha256: completion.sha256,
+      success,
       resultSummary: `${result.summary}\n[awce] artifacts: ${upload.receipts.filter((r) => r.status === 'ACCEPTED').length} accepted`,
-      ...(result.success
+      ...(success
         ? (upload.ok ? {} : { error: `artifact upload failed (HTTP ${upload.httpStatus})` })
-        : { error: result.error ?? 'agent step failed' }),
+        : { error: failureReason ?? 'agent step failed' }),
     });
     if (handoff) {
       client.send({
