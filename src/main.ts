@@ -63,6 +63,9 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
 
     const upload = await uploadArtifacts(frame, httpBase(config), config.executorToken, capsule.artifactsDir, (m) => stage(`artifacts: ${m}`));
 
+    // Community edition note: SdlcDriver.onSuccess is a stub (always stop) and the
+    // packaged sdlc.json omits onSuccess — TASK_HANDOFF is THE relay mechanism, so
+    // any agent-written proposal is sent unconditionally.
     const handoff = await readHandoffProposal(capsule);
     if (handoff) stage(`handoff proposal: to=${handoff.to} (${handoff.toType})`);
 
@@ -110,6 +113,13 @@ function main(): void {
     authenticatedWsUrl(config),
     {
       onDispatch: (frame) => { void handleDispatch(client, config, frame, log); },
+      onFrame: (frame) => {
+        if (frame.type === 'TASK_HANDOFF_RESULT') {
+          log('info', `handoff result d${frame.dispatchId}: status=${frame.status ?? '?'}`
+            + `${frame.downstreamDispatchId ? ` downstream=d${frame.downstreamDispatchId}` : ''}`
+            + `${frame.reasonCode ? ` reason=${frame.reasonCode}` : ''}${frame.message ? ` (${frame.message})` : ''}`);
+        }
+      },
       onStateChange: (state) => log('info', `executor ${state}`),
     },
     (level, message) => log(level, message),

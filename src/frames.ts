@@ -122,7 +122,20 @@ export interface ArtifactUploadedFrame {
   readonly metaJson?: string;
 }
 
-export type ServerFrame = TaskDispatchFrame;
+/** Reply to TASK_HANDOFF: status AGENT_DISPATCHED/HUMAN_ASSIGNED/REJECTED… + downstreamDispatchId. */
+export interface TaskHandoffResultFrame {
+  readonly type: 'TASK_HANDOFF_RESULT';
+  readonly dispatchId: number;
+  readonly workitemId?: number;
+  readonly status?: string;
+  readonly downstreamDispatchId?: number;
+  readonly targetType?: string;
+  readonly targetRef?: string | number;
+  readonly reasonCode?: string;
+  readonly message?: string;
+}
+
+export type ServerFrame = TaskDispatchFrame | TaskHandoffResultFrame;
 export type ClientFrame =
   | TaskAckFrame | TaskProgressFrame | TaskResultFrame
   | TaskHandoffFrame | HeartbeatFrame | ArtifactUploadedFrame;
@@ -132,6 +145,6 @@ export function decodeServerFrame(raw: string): ServerFrame | undefined {
   try { parsed = JSON.parse(raw); } catch { return undefined; }
   if (typeof parsed !== 'object' || parsed === null) return undefined;
   const frame = parsed as { type?: unknown };
-  if (frame.type !== 'TASK_DISPATCH') return undefined;
-  return parsed as TaskDispatchFrame;
+  if (frame.type !== 'TASK_DISPATCH' && frame.type !== 'TASK_HANDOFF_RESULT') return undefined;
+  return parsed as ServerFrame;
 }

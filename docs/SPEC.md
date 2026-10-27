@@ -182,3 +182,12 @@ IDLE ─TASK_DISPATCH→ ACKING ─(send ACK)→ DOWNLOADING ─(md5 ok)→ MOUN
 | M3 | runner + prompt + mcp-config | Claude Code 拿到包材料跑完一步（日志可见） |
 | M4 | artifacts + result + handoff | 平台工单显示 SUCCEEDED，产物/交接记录可见 |
 | M5 | 验证记录 + README 快速开始 | 第三方可按文档复现 |
+
+
+## M5 实测发现（社区版 1.0.0 源码级验证）
+
+1. **SdlcDriver 是存根**：`onSuccess/onFail` 恒返回 stop——`NEXT_STEP/GOTO_STEP` 自动推进是企业版能力。社区版的唯一接力机制是 `TASK_HANDOFF`（InboundFrameRouter → HandoffService）：按 roleCode 解析在线 agent → 改绑工单到目标 agent 的默认 SDLC 首步 → enqueueHandoff 派发。
+2. **包内 sdlc.json 不含 onSuccess/onFail 字段**：执行器无法从 capsule 判断步骤推进策略；因此 awce 无条件转发 agent 的 handoff 提案（社区版下不会与自动推进冲突）。
+3. **任务包可含非 ASCII 路径**（`teammates/<角色中文名>/…`）：macOS 自带 Info-ZIP unzip 报 Illegal byte sequence；解压优先走 `python3 -m zipfile`（EFS UTF-8 正确），unzip 仅兜底。
+4. **上游交付物随包流至下游**：`deliverables/*` 会被打包进下游 capsule 的 teammates 目录（防递归膨胀的排除规则见 PackageContextAssembler.isTeammateHandoffArtifact）。
+5. **TASK_HANDOFF_RESULT 回执帧**：status=AGENT_DISPATCHED 时带 downstreamDispatchId；人类回交为 HUMAN_ASSIGNED(REQUESTED_HUMAN)。

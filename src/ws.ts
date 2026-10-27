@@ -2,11 +2,12 @@
 // Protocol: GET /ws/executor?executorId&token (no handshake frame; auth on open).
 
 import WebSocket from 'ws';
-import type { ClientFrame, ServerFrame } from './frames.js';
+import type { ClientFrame, ServerFrame, TaskDispatchFrame } from './frames.js';
 import { decodeServerFrame } from './frames.js';
 
 export interface WsClientHandlers {
-  onDispatch: (frame: ServerFrame) => void;
+  onDispatch: (frame: TaskDispatchFrame) => void;
+  onFrame?: (frame: ServerFrame) => void;
   onStateChange?: (state: 'connecting' | 'online' | 'offline', detail?: string) => void;
 }
 
@@ -68,7 +69,8 @@ export class WsClient {
     socket.on('message', (data) => {
       const frame = decodeServerFrame(data.toString());
       if (!frame) return; // unknown/no-op frames are ignored (forward compat)
-      this.handlers.onDispatch(frame);
+      this.handlers.onFrame?.(frame);
+      if (frame.type === 'TASK_DISPATCH') this.handlers.onDispatch(frame);
     });
 
     socket.on('error', (error) => {

@@ -82,7 +82,7 @@ export async function buildPrompt(capsule: Capsule): Promise<string> {
     `## Output contract\n`
     + `- Work in the current directory; it is your private workspace for this dispatch.\n`
     + `- Write deliverable files into \`artifacts/deliverables/\` (create subdirectories as needed).\n`
-    + `- If the SDLC has a next owner, write \`artifacts/handoff-proposal.json\` with fields: nextOwner (role name from the roster), nextRole, summary.\n`
+    + `- If the work should continue with another agent (e.g. review after implementation), write \`artifacts/handoff-proposal.json\` with fields: nextOwner (a role code such as "developer" or "reviewer"), toType ("AGENT" or "HUMAN"), summary. Your platform relays it to the next worker.\n`
     + `- When done, reply with a short summary of what you delivered.\n`
     + `- You may use the \`autowonder\` MCP tools (memory, workitem context) when helpful.\n`
     + `- The platform's policy for this dispatch: commit/push/network may be disabled — do local work only unless explicitly allowed.`,
@@ -90,6 +90,7 @@ export async function buildPrompt(capsule: Capsule): Promise<string> {
 
   return parts.join('\n\n---\n\n');
 }
+
 
 function safeJson(raw: string): Record<string, unknown> | undefined {
   try { return JSON.parse(raw) as Record<string, unknown>; } catch { return undefined; }

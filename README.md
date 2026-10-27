@@ -43,6 +43,7 @@ awce daemon ──▶ TASK_ACK / TASK_PROGRESS / TASK_RESULT / TASK_HANDOFF
 - [x] runner：Claude Code 无头执行 + 事件上报
 - [x] 产物上传 + handoff 上报（multipart 中继通道，逐文件回执）
 - [x] 端到端验证：本地 AutoWonder 真实派发一轮（dispatch 10002 → SUCCEEDED，39s）
+- [x] 多 Agent 接力：TASK_HANDOFF 双变体验证（AGENT_DISPATCHED 跨角色接力 + HUMAN_ASSIGNED 交还人类）
 
 ## 快速开始（本地 AutoWonder 部署）
 

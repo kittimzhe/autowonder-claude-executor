@@ -33,7 +33,15 @@ async function unzipInto(zipBytes: Buffer, targetDir: string): Promise<void> {
   const tmpZip = join(os.tmpdir(), `awce-${Date.now()}.zip`);
   writeFileSync(tmpZip, zipBytes);
   try {
-    await run('unzip', ['-o', '-q', tmpZip, '-d', targetDir]);
+    // Task packages may contain non-ASCII paths (e.g. teammates/开发工程师/…).
+    // macOS's bundled Info-ZIP `unzip` mishandles UTF-8 entry names ("Illegal
+    // byte sequence"), so prefer Python's zipfile (correct EFS handling) and
+    // keep `unzip` only as a fallback where python3 is absent.
+    try {
+      await run('python3', ['-m', 'zipfile', '-e', tmpZip, targetDir]);
+    } catch {
+      await run('unzip', ['-o', '-q', tmpZip, '-d', targetDir]);
+    }
   } finally {
     unlinkSync(tmpZip);
   }
