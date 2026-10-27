@@ -34,15 +34,34 @@ awce daemon ──▶ TASK_ACK / TASK_PROGRESS / TASK_RESULT / TASK_HANDOFF
 
 ## 状态
 
-🚧 **开发中**（立项 2026-10-25）。路线图见 [docs/SPEC.md](docs/SPEC.md)。
+🚧 **M1–M4 已完成并端到端验证**（立项 2026-10-25）。路线图见 [docs/SPEC.md](docs/SPEC.md)。
 
 - [x] 协议精读与实现规格（[docs/PROTOCOL.md](docs/PROTOCOL.md)、[docs/SPEC.md](docs/SPEC.md)）
 - [x] MCP 链路验证：Claude Code ↔ AutoWonder `/api/mcp` 端到端打通（112 工具）
-- [ ] 最小 daemon：WS 接入 + TASK_DISPATCH/ACK/PROGRESS/RESULT 主环
-- [ ] capsule：任务包下载/校验/解压
-- [ ] runner：Claude Code 无头执行 + 事件上报
-- [ ] 产物上传 + handoff 上报
-- [ ] 端到端验证：本地 AutoWonder 真实派发一轮
+- [x] 最小 daemon：WS 接入 + TASK_DISPATCH/ACK/PROGRESS/RESULT 主环（平台显示 ONLINE）
+- [x] capsule：任务包下载/校验/解压（整包 md5 + 逐文件 sha256）
+- [x] runner：Claude Code 无头执行 + 事件上报
+- [x] 产物上传 + handoff 上报（multipart 中继通道，逐文件回执）
+- [x] 端到端验证：本地 AutoWonder 真实派发一轮（dispatch 10002 → SUCCEEDED，39s）
+
+## 快速开始（本地 AutoWonder 部署）
+
+```bash
+npm install && npm run build
+
+# 1. 平台侧创建执行器（MCP 或 API；clientKind 只有 QODER_CLI/ QODER_CN_CLI 可选）
+#    记下返回的 executor id 和 token
+# 2. 启动 daemon
+AWCE_WS_URL=ws://127.0.0.1:7001/ws/executor \
+AWCE_EXECUTOR_ID=<id> AWCE_EXECUTOR_TOKEN=<exec_...> \
+AWCE_WORKSPACE_ROOT=/tmp/awce-runs \
+node dist/main.js
+# 3. 平台执行器列表应显示 ONLINE（依赖首帧心跳，daemon 已内置）
+# 4. 指派一个工单给对应 agent → 观察 daemon 日志走完
+#    ACK → capsule → prompt → claude → artifacts → RESULT
+```
+
+环境变量全表见 [docs/SPEC.md](docs/SPEC.md)。
 
 ## 免责与边界
 
