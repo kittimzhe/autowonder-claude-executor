@@ -11,7 +11,7 @@ import { uploadArtifacts } from './artifacts.js';
 import { downloadCheckpoint, uploadCheckpoint } from './checkpoint.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile, rm } from 'node:fs/promises';
+import { readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { WsClient } from './ws.js';
 import type { TaskDispatchFrame } from './frames.js';
@@ -78,7 +78,14 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
       stage('retry attempt without resume checkpoint; starting fresh');
     }
 
-    let prompt = await buildPrompt(capsule);
+    // Stable session workspace: retries of the same step run the engine from the
+    // SAME cwd so a native --resume finds the dead attempt's conversation.
+    const sessionRoot = capsule.sessionDir;
+    const sessionArtifacts = join(sessionRoot, 'artifacts');
+    await rm(sessionArtifacts, { recursive: true, force: true });
+    const sessionCapsule: Capsule = { ...capsule, root: sessionRoot, workspaceDir: join(sessionRoot, 'workspace'), artifactsDir: sessionArtifacts };
+
+    let prompt = await buildPrompt(sessionCapsule);
     prompt += `\n\n---\n\n## Execution metadata\n- Current attempt: ${frame.attempt}${resumeNote}`;
     stage(`prompt assembled (${prompt.length} chars)`);
 
@@ -90,13 +97,6 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
       activeStepId: String(frame.sdlcStepId),
       state: { phase: 'context-ready', attempt: frame.attempt, promptChars: prompt.length, resumed: Boolean(resumeNote) },
     }).then((r) => stage(`recovery checkpoint seq=${r.checkpointSeq} (${r.sizeBytes}B)`));
-
-    // Stable session workspace: retries of the same step run the engine from the
-    // SAME cwd so a native --resume finds the dead attempt's conversation.
-    const sessionRoot = capsule.sessionDir;
-    const sessionArtifacts = join(sessionRoot, 'artifacts');
-    await rm(sessionArtifacts, { recursive: true, force: true });
-    const sessionCapsule: Capsule = { ...capsule, root: sessionRoot, workspaceDir: join(sessionRoot, 'workspace'), artifactsDir: sessionArtifacts };
 
     const runOnce = (resumeSessionId: string | undefined) => runAgent(sessionCapsule, prompt, {
       agentBin: config.agentBin,
@@ -148,6 +148,16 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
       state: { phase: 'agent-done', attempt: frame.attempt, success: agentSuccess, summary: result.summary.slice(0, 400) },
     }).then((r) => stage(`recovery checkpoint seq=${r.checkpointSeq} (${r.sizeBytes}B)`));
 
+    // Tolerate agents that drop the artifacts/ prefix (observed with real LLMs):
+    // move a stray <sessionRoot>/deliverables into artifacts/ before upload.
+    const strayDeliverables = join(sessionRoot, 'deliverables');
+    if (existsSync(strayDeliverables)) {
+      await rm(join(sessionArtifacts, 'deliverables'), { recursive: true, force: true }).catch(() => {});
+      await rename(strayDeliverables, join(sessionArtifacts, 'deliverables')).then(
+        () => stage('relocated stray deliverables/ into artifacts/'),
+        () => {},
+      );
+    }
     const upload = await uploadArtifacts(frame, httpBase(config), config.executorToken, sessionCapsule.artifactsDir, (m) => stage(`artifacts: ${m}`));
 
     // Community edition note: SdlcDriver.onSuccess is a stub (always stop) and the

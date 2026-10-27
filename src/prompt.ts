@@ -81,10 +81,10 @@ export async function buildPrompt(capsule: Capsule): Promise<string> {
   parts.push(
     `## Output contract\n`
     + `- Work in the current directory; it is your private workspace for this dispatch.\n`
-    + `- Write deliverable files into \`artifacts/deliverables/\` (create subdirectories as needed).\n`
-    + `- If the work should continue with another agent (e.g. review after implementation), write \`artifacts/handoff-proposal.json\` with fields: nextOwner (a role code such as "developer" or "reviewer"), toType ("AGENT" or "HUMAN"), summary. Your platform relays it to the next worker.\n`
+    + `- Write deliverable files into \`${join(capsule.artifactsDir, 'deliverables')}\` — this ABSOLUTE path (create subdirectories as needed). Do not write deliverables anywhere else.\n`
+    + `- If the work should continue with another agent (e.g. review after implementation), write \`${join(capsule.artifactsDir, 'handoff-proposal.json')}\` with fields: nextOwner (a role code such as "developer" or "reviewer"), toType ("AGENT" or "HUMAN"), summary. Your platform relays it to the next worker.\n`
     + `- When done, reply with a short summary of what you delivered.\n`
-    + `- To signal that the WORK failed (process exit code cannot express this), write a file \`artifacts/FAILURE\` containing the reason.\n`
+    + `- To signal that the WORK failed (process exit code cannot express this), write a file \`${join(capsule.artifactsDir, 'FAILURE')}\` containing the reason.\n`
     + `- You may use the \`autowonder\` MCP tools (memory, workitem context) when helpful.\n`
     + `- The platform's policy for this dispatch: commit/push/network may be disabled — do local work only unless explicitly allowed.`,
   );
