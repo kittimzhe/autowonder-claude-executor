@@ -21,14 +21,23 @@ export interface RunnerResult {
   readonly error: string | undefined;
 }
 
-const CCB_DEFAULT = join(homedir(), 'project/claude-code-best/claude-code/dist/cli-node.js');
+/** Optional alternative engine: a local Claude Code build runnable via `node <cli.js>`. */
+const CCB_FALLBACK = join(homedir(), 'project/claude-code-best/claude-code/dist/cli-node.js');
 
-/** Resolve "node::default" to the ccb build present on this machine. */
+/**
+ * Resolve the engine command.
+ * - "default" (or empty) → official `claude` CLI on PATH; falls back to a local
+ *   build path when present (useful during development).
+ * - "node::<path>"      → `node <path>`.
+ * - anything else        → used verbatim as command + args (e.g. "npx -y @qoder/qoder-cli").
+ */
 function resolveAgentCommand(agentBin: string): { command: string; args: string[] } {
-  if (agentBin === 'node::default') {
-    return existsSync(CCB_DEFAULT)
-      ? { command: 'node', args: [CCB_DEFAULT] }
-      : { command: 'claude', args: [] };
+  if (agentBin === 'default' || agentBin === 'node::default' || agentBin.length === 0) {
+    if (existsSync(CCB_FALLBACK)) return { command: 'node', args: [CCB_FALLBACK] };
+    return { command: 'claude', args: [] };
+  }
+  if (agentBin.startsWith('node::')) {
+    return { command: 'node', args: [agentBin.slice('node::'.length)] };
   }
   const parts = agentBin.split(/\s+/);
   const command = parts[0];

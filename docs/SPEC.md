@@ -36,7 +36,7 @@ main.ts
 | `AWCE_WS_URL` | ✓ | 如 `ws://127.0.0.1:7001/ws/executor` |
 | `AWCE_EXECUTOR_ID` | ✓ | 平台签发的执行器 ID |
 | `AWCE_EXECUTOR_TOKEN` | ✓ | 平台签发的执行器 token（明文，随 WS query 传输） |
-| `AWCE_AGENT_BIN` | ✗ | Claude Code 可执行入口，默认 `node <claude-code-best>/dist/cli-node.js`（可指向官方 `claude`） |
+| `AWCE_AGENT_BIN` | ✗ | 引擎命令，默认 `node::default`（自动解析：优先本机 Claude Code 构建，否则官方 `claude`）；也可 `node::<path>` 或任意命令串（如 `npx -y @anthropic-ai/claude-code`） |
 | `AWCE_AGENT_MODEL` | ✗ | 传给 agent 的 `--model`（中转部署需要，如 `GLM-5.1`） |
 | `AWCE_WORKSPACE_ROOT` | ✗ | capsule 根目录，默认 `~/.awce/capsules/` |
 | `AWCE_LOG_LEVEL` | ✗ | debug/info/warn/error，默认 info |
