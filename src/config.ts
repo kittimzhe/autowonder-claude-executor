@@ -7,6 +7,7 @@ export interface AwceConfig {
   readonly agentBin: string;
   readonly agentModel: string | undefined;
   readonly workspaceRoot: string;
+  readonly maxConcurrent: number;
   readonly logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
 
@@ -36,11 +37,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AwceConfig {
         ?? 'node::default', // resolved by runner against known Claude Code installs
       agentModel: optional('AWCE_AGENT_MODEL'),
       workspaceRoot: optional('AWCE_WORKSPACE_ROOT') ?? `${process.env.HOME ?? '.'}/.awce/capsules`,
+      maxConcurrent: clampMaxConcurrent(optional('AWCE_MAX_CONCURRENT')),
       logLevel: logLevel === 'debug' || logLevel === 'warn' || logLevel === 'error' ? logLevel : 'info',
     };
   } finally {
     process.env = previous;
   }
+}
+
+/** Declared inventory capacity, 1..50 (server closes the session outside the range). */
+function clampMaxConcurrent(raw: string | undefined): number {
+  const parsed = raw === undefined ? Number.NaN : Number.parseInt(raw, 10);
+  if (Number.isNaN(parsed)) return 1; // MVP executes one dispatch at a time
+  return Math.min(50, Math.max(1, parsed));
 }
 
 /** WS endpoint with auth query params (token travels in the URL per protocol §3). */

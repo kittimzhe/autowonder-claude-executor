@@ -10,7 +10,24 @@ export type FrameType =
 /** Capabilities a client may declare on HEARTBEAT (protocolFeatures). */
 export type ProtocolFeature =
   | 'TASK_PACKAGE_SIGNATURE_V1'
-  | 'DEBUG_LOG_V1';
+  | 'DEBUG_LOG_V1'
+  | 'dispatch_inventory_v1';
+
+/** Executor dispatch inventory — carried inside HEARTBEAT (dispatch_inventory_v1). */
+export interface ExecutorInventory {
+  /** 1..50; the server validates the range and closes the session on violation. */
+  readonly maxConcurrentDispatches: number;
+  /** Required with dispatch_inventory_v1. */
+  readonly dispatchInventoryReady: boolean;
+  /** Dispatches currently executing here (≤50; must be a subset of owned). */
+  readonly runningDispatchIds: readonly number[];
+  /** All dispatches this executor still owns (≤1000; superset of running). */
+  readonly ownedDispatchIds: readonly number[];
+  /** Conversation turns in flight (≤50). */
+  readonly runningConversationTurnIds: readonly number[];
+  /** Optional; only "OWNED_DISPATCH_LIMIT_EXCEEDED" has defined semantics. */
+  readonly dispatchInventoryError?: string;
+}
 
 /** DOWN: server → executor. One per dispatch entering DISPATCHED. */
 export interface TaskDispatchFrame {
@@ -104,10 +121,23 @@ export interface TaskHandoffFrame {
   readonly reason: string;
 }
 
-/** UP: keep-alive, ~30s period. Refreshes exec:online / exec:route TTL (90s). */
+/** UP: keep-alive, ~30s period. Refreshes exec:online / exec:route TTL (90s).
+ * With dispatch_inventory_v1 the server renews active leases for the reported
+ * running dispatches and may trigger a runtime reconcile — long-running steps
+ * MUST report their dispatch ids here or risk being reclaimed as dead. */
 export interface HeartbeatFrame {
   readonly type: 'HEARTBEAT';
   readonly protocolFeatures?: readonly ProtocolFeature[];
+  /** Executor version string, surfaced in platform executor diagnostics. */
+  readonly version?: string;
+  /** Current engine model label, surfaced in platform executor diagnostics. */
+  readonly model?: string;
+  readonly maxConcurrentDispatches?: number;
+  readonly dispatchInventoryReady?: boolean;
+  readonly runningDispatchIds?: readonly number[];
+  readonly ownedDispatchIds?: readonly number[];
+  readonly runningConversationTurnIds?: readonly number[];
+  readonly dispatchInventoryError?: string;
 }
 
 /** Phase 2 — not emitted by the MVP. */
@@ -135,7 +165,14 @@ export interface TaskHandoffResultFrame {
   readonly message?: string;
 }
 
-export type ServerFrame = TaskDispatchFrame | TaskHandoffResultFrame;
+/** Reply to TASK_RESULT: whether the durable result was accepted. */
+export interface TaskResultAckFrame {
+  readonly type: 'TASK_RESULT_ACK';
+  readonly dispatchId: number;
+  readonly accepted?: boolean;
+}
+
+export type ServerFrame = TaskDispatchFrame | TaskHandoffResultFrame | TaskResultAckFrame;
 export type ClientFrame =
   | TaskAckFrame | TaskProgressFrame | TaskResultFrame
   | TaskHandoffFrame | HeartbeatFrame | ArtifactUploadedFrame;
@@ -145,6 +182,6 @@ export function decodeServerFrame(raw: string): ServerFrame | undefined {
   try { parsed = JSON.parse(raw); } catch { return undefined; }
   if (typeof parsed !== 'object' || parsed === null) return undefined;
   const frame = parsed as { type?: unknown };
-  if (frame.type !== 'TASK_DISPATCH' && frame.type !== 'TASK_HANDOFF_RESULT') return undefined;
+  if (frame.type !== 'TASK_DISPATCH' && frame.type !== 'TASK_HANDOFF_RESULT' && frame.type !== 'TASK_RESULT_ACK') return undefined;
   return parsed as ServerFrame;
 }

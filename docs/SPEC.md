@@ -191,3 +191,20 @@ IDLE ─TASK_DISPATCH→ ACKING ─(send ACK)→ DOWNLOADING ─(md5 ok)→ MOUN
 3. **任务包可含非 ASCII 路径**（`teammates/<角色中文名>/…`）：macOS 自带 Info-ZIP unzip 报 Illegal byte sequence；解压优先走 `python3 -m zipfile`（EFS UTF-8 正确），unzip 仅兜底。
 4. **上游交付物随包流至下游**：`deliverables/*` 会被打包进下游 capsule 的 teammates 目录（防递归膨胀的排除规则见 PackageContextAssembler.isTeammateHandoffArtifact）。
 5. **TASK_HANDOFF_RESULT 回执帧**：status=AGENT_DISPATCHED 时带 downstreamDispatchId；人类回交为 HUMAN_ASSIGNED(REQUESTED_HUMAN)。
+
+
+## M6 实测发现：HEARTBEAT 的完整语义（社区版源码级）
+
+HEARTBEAT 不只是保活。不带 protocolFeatures 时走 legacy 路径（仅上报 runningDispatchIds）；声明 `dispatch_inventory_v1` 后服务端要求（InboundFrameRouter.dispatchSnapshot）：
+
+- `maxConcurrentDispatches`：int 1..50，越界直接 `EXECUTOR_PROTOCOL_INCOMPATIBLE` 关会话
+- `dispatchInventoryReady`：boolean，必填
+- `runningDispatchIds`（≤50）必须 ⊆ `ownedDispatchIds`（必填，≤1000）
+- `runningConversationTurnIds`（≤50）
+- `dispatchInventoryError`：仅 `OWNED_DISPATCH_LIMIT_EXCEEDED` 有定义语义（且要求 ready=false、owned==running）
+
+心跳路径副作用：`renewActiveLeases`（按上报的 running 续租，**长任务不报会被判死回收**）；inventoryReady=true 时触发 runtimeReconciler，否则走 drainScheduler。`version`/`model` 字段进平台执行器诊断。
+
+awce 实现：单槽执行 `AWCE_MAX_CONCURRENT`（默认 1，声明容量仅用于协议合规），running=当前派发、owned=累计见过（最新 1000）。
+
+另发现：TASK_RESULT 有服务端回执帧 `TASK_RESULT_ACK {dispatchId, accepted}`（文档未写，靠未知帧日志捕获）。

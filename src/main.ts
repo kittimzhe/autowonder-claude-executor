@@ -21,9 +21,15 @@ function makeLogger(threshold: 'debug' | 'info' | 'warn' | 'error'): Log {
   };
 }
 
+const AWCE_VERSION = '0.3.0';
+
 /** Dispatches already seen in this process — protocol requires idempotency by dispatchId. */
 const seenDispatches = new Set<number>();
 let inFlight = false; // single-slot concurrency for the MVP
+
+/** Inventory state reported via HEARTBEAT (dispatch_inventory_v1). */
+const runningDispatches = new Set<number>();
+const ownedDispatches = new Set<number>();
 
 async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskDispatchFrame, log: Log): Promise<void> {
   if (seenDispatches.has(frame.dispatchId)) {
@@ -31,12 +37,14 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
     return;
   }
   seenDispatches.add(frame.dispatchId);
+  ownedDispatches.add(frame.dispatchId);
   if (inFlight) {
     // Honest single-slot rejection: the server will retry/stop per its onFail policy.
     client.send({ type: 'TASK_RESULT', dispatchId: frame.dispatchId, success: false, resultSummary: 'awce busy', error: 'BUSY: single-slot MVP' });
     return;
   }
   inFlight = true;
+  runningDispatches.add(frame.dispatchId);
 
   const stage = (name: string) => log('info', `[d${frame.dispatchId}] ${name}`);
   const progress = (summary: string) => client.send({ type: 'TASK_PROGRESS', dispatchId: frame.dispatchId, resultSummary: summary });
@@ -100,6 +108,7 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
       error: (error as Error).message.slice(0, 500),
     });
   } finally {
+    runningDispatches.delete(frame.dispatchId);
     inFlight = false;
   }
 }
@@ -118,9 +127,23 @@ function main(): void {
           log('info', `handoff result d${frame.dispatchId}: status=${frame.status ?? '?'}`
             + `${frame.downstreamDispatchId ? ` downstream=d${frame.downstreamDispatchId}` : ''}`
             + `${frame.reasonCode ? ` reason=${frame.reasonCode}` : ''}${frame.message ? ` (${frame.message})` : ''}`);
+        } else if (frame.type === 'TASK_RESULT_ACK') {
+          log('info', `result ack d${frame.dispatchId}: accepted=${frame.accepted ?? '?'}`);
         }
       },
       onStateChange: (state) => log('info', `executor ${state}`),
+      // dispatch_inventory_v1: report capacity + running/owned dispatch ids so the
+      // server renews active leases (renewActiveLeases) instead of reclaiming
+      // long-running steps as dead.
+      getInventory: () => ({
+        maxConcurrentDispatches: config.maxConcurrent,
+        dispatchInventoryReady: true,
+        runningDispatchIds: [...runningDispatches],
+        ownedDispatchIds: [...ownedDispatches].slice(-1000), // newest 1000, server cap
+        runningConversationTurnIds: [],
+      }),
+      getVersion: () => AWCE_VERSION,
+      getModel: () => config.agentModel ?? 'default',
     },
     (level, message) => log(level, message),
   );

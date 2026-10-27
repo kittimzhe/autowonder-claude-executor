@@ -2,13 +2,18 @@
 // Protocol: GET /ws/executor?executorId&token (no handshake frame; auth on open).
 
 import WebSocket from 'ws';
-import type { ClientFrame, ServerFrame, TaskDispatchFrame } from './frames.js';
+import type { ClientFrame, ExecutorInventory, ServerFrame, TaskDispatchFrame } from './frames.js';
 import { decodeServerFrame } from './frames.js';
 
 export interface WsClientHandlers {
   onDispatch: (frame: TaskDispatchFrame) => void;
   onFrame?: (frame: ServerFrame) => void;
   onStateChange?: (state: 'connecting' | 'online' | 'offline', detail?: string) => void;
+  /** Current dispatch inventory, sampled for every HEARTBEAT. */
+  getInventory?: () => ExecutorInventory;
+  /** Reported on HEARTBEAT for platform diagnostics. */
+  getVersion?: () => string;
+  getModel?: () => string;
 }
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -61,14 +66,19 @@ export class WsClient {
       this.handlers.onStateChange?.('online');
       // Immediate heartbeat: the platform's executor list derives ONLINE from
       // the persisted heartbeat timestamp, not from the WS session itself.
-      this.send({ type: 'HEARTBEAT' });
+      this.send(this.buildHeartbeat());
       this.flushPending();
       this.startHeartbeat();
     });
 
     socket.on('message', (data) => {
-      const frame = decodeServerFrame(data.toString());
-      if (!frame) return; // unknown/no-op frames are ignored (forward compat)
+      const raw = data.toString();
+      const frame = decodeServerFrame(raw);
+      if (!frame) {
+        // Forward compat: log-and-ignore unknown downstream frames.
+        try { this.log('info', `inbound unknown frame type=${(JSON.parse(raw) as { type?: string }).type ?? '?'}`); } catch { /* non-JSON */ }
+        return;
+      }
       this.handlers.onFrame?.(frame);
       if (frame.type === 'TASK_DISPATCH') this.handlers.onDispatch(frame);
     });
@@ -93,8 +103,25 @@ export class WsClient {
   private startHeartbeat(): void {
     this.clearHeartbeat();
     this.heartbeatTimer = setInterval(() => {
-      this.send({ type: 'HEARTBEAT' });
+      this.send(this.buildHeartbeat());
     }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  private buildHeartbeat(): ClientFrame {
+    const inventory = this.handlers.getInventory?.();
+    const heartbeat: Record<string, unknown> = { type: 'HEARTBEAT' };
+    if (this.handlers.getVersion) heartbeat.version = this.handlers.getVersion();
+    if (this.handlers.getModel) heartbeat.model = this.handlers.getModel();
+    if (inventory) {
+      heartbeat.protocolFeatures = ['dispatch_inventory_v1'];
+      heartbeat.maxConcurrentDispatches = inventory.maxConcurrentDispatches;
+      heartbeat.dispatchInventoryReady = inventory.dispatchInventoryReady;
+      heartbeat.runningDispatchIds = [...inventory.runningDispatchIds];
+      heartbeat.ownedDispatchIds = [...inventory.ownedDispatchIds];
+      heartbeat.runningConversationTurnIds = [...inventory.runningConversationTurnIds];
+      if (inventory.dispatchInventoryError !== undefined) heartbeat.dispatchInventoryError = inventory.dispatchInventoryError;
+    }
+    return heartbeat as unknown as ClientFrame;
   }
 
   private clearHeartbeat(): void {
