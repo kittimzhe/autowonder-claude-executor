@@ -256,3 +256,10 @@ attempt 1 强杀（kill -9，检查点 seq=1 已上传）→ 执行器重启（�
 3. **awce 暂停实现**：`pauseControllers: Map<dispatchId, AbortController>`；收到 `TASK_PAUSE` 时 abort 对应 run → runner 对子进程发 SIGTERM（5s 后 SIGKILL 兜底）→ 以 `paused:true` 收尾；主流程上传一个 `phase:"paused"` 检查点并回 `TASK_PAUSED`，跳过正常 RESULT。未在本执行器运行的 dispatchId 直接回 `TASK_PAUSE_FAILED`（已实测服务端接受并转 PAUSE_FAILED）。
 4. **预签名 package URL 有 600s TTL**：`DaemonTaskPackageController` 暴露 `POST /api/daemon/dispatches/{id}/package-url?token=<executorToken>` → `{downloadUrl, expiresInSeconds}`；状态不可刷新时 409、鉴权失败 401。awce 下载失败时用帧里的 `packageRefreshPath` 刷新一次再重试，覆盖长队列/慢下载导致的 URL 过期。
 5. **派发帧构建的隐性协议门**：`WsDispatchTransport.buildFrame` 会调 `DispatchMcpTokenService.issue`（为 dispatch 签发 `awdispatch_` JWT）、`checkpointService.descriptor`（续跑描述符）、`modelSelectionService.freeze`（选中模型且执行器未声明 `TASK_MODEL_SELECTION_V1` 时抛 `ExecutorProtocolCompatibilityException`）。这些在 `requireTaskPackageProtocol` 之后、`dispatch urls` 日志之前执行——任一抛出都会让派发在“dispatch sending”后静默失败（异常进 `runPending failed` / 异步 `SimpleAsyncUncaughtExceptionHandler`）。排障时须对照后端 ERROR 栈，而非只看执行器侧无派发到达。
+
+## M11.5 实测发现：PAUSE→RESUME 全闭环（工单 10027 实测）
+
+1. **恢复入口是 `autowonder.control_delivery` 的 `action:"retry"`**（非 resume_workitem——后者是工单状态机迁移，需 toNodeId，与派发级恢复无关）。REST 等价端点 `POST /{workitemId}/dispatches/{dispatchId}/continue`。两者最终走 `DispatchService.continueDispatch`。
+2. **服务端语义**：paused 派发转 `CANCELED(MANUAL_CONTINUE)`，同时创建替补派发（attempt+1，`resumeFromDispatchId=paused id`，`resumeMode=RECOVERY`）。护栏：原执行器在线且派发非终态时拒绝创建并行恢复执行。
+3. **执行器侧全链路实测**（d10031→d10032）：下载 paused 检查点（seq=3，65B）注入 prompt → 尝试原生 `--resume`（引擎会话 7cf0dd28…）→ ccb 无头限制失败（No conversation found）→ **自动降级 fresh+checkpoint context** → 新会话跑完 → artifacts 1/1 accepted → V2 completion 检查点 seq=5 → RESULT accepted → SUCCEEDED。
+4. **结论**：社区版的"暂停后续跑"= 检查点接力，不依赖引擎原生会话存活性——`TASK_PAUSED` 钉的检查点就是恢复事实源，与崩溃恢复（M8）共用同一套注入机制。
