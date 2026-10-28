@@ -28,7 +28,7 @@ function makeLogger(threshold: 'debug' | 'info' | 'warn' | 'error'): Log {
   };
 }
 
-const AWCE_VERSION = '0.3.1';
+const AWCE_VERSION = '0.3.2';
 
 /** Dispatches already seen in this process — protocol requires idempotency by dispatchId. */
 const seenDispatches = new Set<number>();
