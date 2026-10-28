@@ -48,6 +48,11 @@ awce daemon ──▶ TASK_ACK / TASK_PROGRESS / TASK_RESULT(V2) / TASK_HANDOFF
 - [x] 库存心跳（dispatch_inventory_v1）：容量/在跑/持有上报，服务端按此续租
 - [x] 任务包验签（TASK_PACKAGE_SIGNATURE_V1）：Ed25519 + 公钥钉死 + 过期检查（单测 6 例；社区版打包器未接线签名，收到即强校验）
 - [x] 检查点与崩溃恢复：RECOVERY 快照 + V2 结果（COMPLETION 钉住）+ 实杀进程恢复闭环（kill -9 → 库存对账 → 120s 宽限 → 带检查点的替代派发 → 恢复交付）
+- [x] 原生会话续跑：providerSessionId → `--resume` 优先，引擎不支持时自动降级 fresh + 检查点文本注入
+- [x] 并发池：多派发并行（容量语义实测：声明 N 可用 N−1，服务端为交互/恢复预留一槽）
+- [x] 暂停→恢复闭环：TASK_PAUSE 下行（570ms 停引擎 + paused 检查点）→ control_delivery(retry) → RECOVERY 替补派发 → 检查点接力续跑 → SUCCEEDED
+- [x] package-url 刷新：预签名 URL 过期自动刷新重试（600s TTL）
+- [x] Docker：多阶段构建（~238MB，非 root），容器内 WS 连通实测
 
 ## 快速开始（本地 AutoWonder 部署）
 
@@ -70,6 +75,22 @@ npm test   # 构建并跑协议单测（Ed25519 验签等）
 ```
 
 环境变量全表见 [docs/SPEC.md](docs/SPEC.md)（`AWCE_WS_URL / EXECUTOR_ID / EXECUTOR_TOKEN / AGENT_BIN / AGENT_MODEL / WORKSPACE_ROOT / MAX_CONCURRENT / LOG_LEVEL`）。
+
+## Docker
+
+```bash
+docker build -t awce .
+# 引擎（claude CLI）不打进镜像 —— 挂载或安装后用 AWCE_AGENT_BIN 指向它：
+docker run --rm \
+  -e AWCE_WS_URL=ws://host.docker.internal:7001/ws/executor \
+  -e AWCE_EXECUTOR_ID=<id> -e AWCE_EXECUTOR_TOKEN=<exec_...> \
+  -e AWCE_AGENT_BIN=claude \
+  -v "$HOME/.claude:/home/node/.claude" \
+  -v awce-workspace:/workspace \
+  awce
+```
+
+多阶段构建（build → prod 依赖 + dist），镜像 ~238MB，非 root 运行。容器内连接宿主机 AutoWonder 用 `host.docker.internal`。
 
 ## 免责与边界
 
