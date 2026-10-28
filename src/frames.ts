@@ -195,6 +195,13 @@ export interface TaskHandoffResultFrame {
   readonly message?: string;
 }
 
+/** DOWN control: stop a running dispatch, checkpoint it, and reply TASK_PAUSED. */
+export interface TaskPauseFrame {
+  readonly type: 'TASK_PAUSE';
+  readonly dispatchId: number;
+  readonly executorId?: number;
+}
+
 /** Reply to TASK_RESULT: whether the durable result was accepted. */
 export interface TaskResultAckFrame {
   readonly type: 'TASK_RESULT_ACK';
@@ -202,16 +209,33 @@ export interface TaskResultAckFrame {
   readonly accepted?: boolean;
 }
 
-export type ServerFrame = TaskDispatchFrame | TaskHandoffResultFrame | TaskResultAckFrame;
+export type ServerFrame = TaskDispatchFrame | TaskHandoffResultFrame | TaskResultAckFrame | TaskPauseFrame;
 export type ClientFrame =
   | TaskAckFrame | TaskProgressFrame | TaskResultFrame
-  | TaskHandoffFrame | HeartbeatFrame | ArtifactUploadedFrame;
+  | TaskHandoffFrame | HeartbeatFrame | ArtifactUploadedFrame
+  | TaskPausedFrame | TaskPauseFailedFrame;
+
+/** UP: completed a TASK_PAUSE — pins the final checkpoint for later resume. */
+export interface TaskPausedFrame {
+  readonly type: 'TASK_PAUSED';
+  readonly dispatchId: number;
+  readonly checkpointSeq: number;
+  readonly checkpointSha256: string;
+}
+
+/** UP: cannot satisfy a TASK_PAUSE (dispatch not running here). */
+export interface TaskPauseFailedFrame {
+  readonly type: 'TASK_PAUSE_FAILED';
+  readonly dispatchId: number;
+  readonly error: string;
+}
 
 export function decodeServerFrame(raw: string): ServerFrame | undefined {
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { return undefined; }
   if (typeof parsed !== 'object' || parsed === null) return undefined;
   const frame = parsed as { type?: unknown };
-  if (frame.type !== 'TASK_DISPATCH' && frame.type !== 'TASK_HANDOFF_RESULT' && frame.type !== 'TASK_RESULT_ACK') return undefined;
+  if (frame.type !== 'TASK_DISPATCH' && frame.type !== 'TASK_HANDOFF_RESULT'
+    && frame.type !== 'TASK_RESULT_ACK' && frame.type !== 'TASK_PAUSE') return undefined;
   return parsed as ServerFrame;
 }

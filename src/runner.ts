@@ -17,6 +17,8 @@ export interface RunnerOptions {
   readonly resumeSessionId: string | undefined;
   /** Fires as soon as the engine reports its session id (stream-json init). */
   readonly onSessionId: ((sessionId: string) => void) | undefined;
+  /** Abort the engine for a server-initiated TASK_PAUSE (graceful SIGTERM). */
+  readonly pauseSignal: AbortSignal | undefined;
 }
 
 export interface RunnerResult {
@@ -24,6 +26,8 @@ export interface RunnerResult {
   readonly summary: string;
   readonly error: string | undefined;
   readonly sessionId: string | undefined;
+  /** True when the run ended because of a server TASK_PAUSE. */
+  readonly paused: boolean;
 }
 
 /** Optional alternative engine: a local Claude Code build runnable via `node <cli.js>`. */
@@ -123,6 +127,17 @@ export async function runAgent(capsule: Capsule, prompt: string, options: Runner
       }
     };
 
+    let pausedBySignal = false;
+    const onAbort = () => {
+      pausedBySignal = true;
+      child.kill('SIGTERM'); // engine gets a chance to flush; SIGKILL on timeout
+      setTimeout(() => { if (!child.killed) child.kill('SIGKILL'); }, 5_000).unref();
+    };
+    if (options.pauseSignal) {
+      if (options.pauseSignal.aborted) onAbort();
+      else options.pauseSignal.addEventListener('abort', onAbort, { once: true });
+    }
+
     const timer = setTimeout(() => {
       options.onProgress('agent.timeout budget exceeded, killing');
       child.kill('SIGKILL');
@@ -141,12 +156,17 @@ export async function runAgent(capsule: Capsule, prompt: string, options: Runner
     });
     child.on('error', (error) => {
       clearTimeout(timer);
-      resolve({ success: false, summary: `agent spawn failed: ${error.message}`, error: error.message, sessionId });
+      resolve({ success: false, summary: `agent spawn failed: ${error.message}`, error: error.message, sessionId, paused: pausedBySignal });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
       consumeLine(stdoutTail); // final unterminated event, if any
       const durationS = Math.round((Date.now() - startedAt) / 1000);
+      if (pausedBySignal) {
+        options.onProgress(`agent.paused duration=${durationS}s`);
+        resolve({ success: false, summary: 'paused by server TASK_PAUSE', error: 'paused', sessionId, paused: true });
+        return;
+      }
       if (code === 0 && !resultIsError) {
         options.onProgress(`agent.finished exit=0 duration=${durationS}s session=${sessionId ?? '?'}`);
         resolve({
@@ -154,6 +174,7 @@ export async function runAgent(capsule: Capsule, prompt: string, options: Runner
           summary: (resultText ?? stdout.trim() ?? '').slice(0, 2000) || 'agent completed with no output',
           error: undefined,
           sessionId,
+          paused: false,
         });
       } else {
         options.onProgress(`agent.finished exit=${code} duration=${durationS}s session=${sessionId ?? '?'}`);
@@ -164,6 +185,7 @@ export async function runAgent(capsule: Capsule, prompt: string, options: Runner
             ? (resultErrors || `agent reported error: ${(resultText ?? '').slice(0, 500)}`)
             : `agent exited ${code}: ${stderr.trim().slice(0, 500)}`,
           sessionId,
+          paused: false,
         });
       }
     });

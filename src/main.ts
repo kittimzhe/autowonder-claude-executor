@@ -35,6 +35,7 @@ const seenDispatches = new Set<number>();
 
 /** Inventory state reported via HEARTBEAT (dispatch_inventory_v1). */
 const runningDispatches = new Set<number>();
+const pauseControllers = new Map<number, AbortController>();
 const ownedDispatches = new Set<number>();
 
 async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskDispatchFrame, log: Log): Promise<void> {
@@ -59,7 +60,8 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
     stage(`dispatch received workitem=${frame.workitemId} attempt=${frame.attempt} policy(commit=${frame.allowCommit},push=${frame.allowPush},net=${frame.allowNetwork})`);
     client.send({ type: 'TASK_ACK', dispatchId: frame.dispatchId });
 
-    const capsule = await buildCapsule(frame, config.workspaceRoot, (m) => { stage(m); progress(`capsule ${m}`); });
+    const capsule = await buildCapsule(frame, config.workspaceRoot, (m) => { stage(m); progress(`capsule ${m}`); },
+      httpBase(config), config.executorToken);
     const mcpConfigPath = await writeMcpConfig(capsule, httpBase(config), frame.dispatchMcpToken);
     stage(`mcp-config ready (${mcpConfigPath})`);
 
@@ -98,6 +100,8 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
       state: { phase: 'context-ready', attempt: frame.attempt, promptChars: prompt.length, resumed: Boolean(resumeNote) },
     }).then((r) => stage(`recovery checkpoint seq=${r.checkpointSeq} (${r.sizeBytes}B)`));
 
+    const pauseController = new AbortController();
+    pauseControllers.set(frame.dispatchId, pauseController);
     const runOnce = (resumeSessionId: string | undefined) => runAgent(sessionCapsule, prompt, {
       agentBin: config.agentBin,
       agentModel: config.agentModel,
@@ -105,6 +109,7 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
       timeoutMs: 30 * 60 * 1000,
       onProgress: progress,
       resumeSessionId,
+      pauseSignal: pauseController.signal,
       onSessionId: (sessionId) => {
         // Persist the REAL engine session id immediately: a crash past this
         // point lets recovery chain --resume onto this very conversation.
@@ -121,12 +126,24 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
     // session — continuity then comes from the injected checkpoint text.
     if (frame.resumeSessionId) stage(`native session resume: ${frame.resumeSessionId} (behavior=${frame.resumeSessionBehavior ?? '?'})`);
     let result = await runOnce(frame.resumeSessionId ?? undefined);
-    if (frame.resumeSessionId && !result.success) {
+    if (frame.resumeSessionId && !result.success && !result.paused) {
       const resumeBroke = /conversation|session/i.test(`${result.error ?? ''}`);
       if (resumeBroke) {
         stage(`native resume unavailable on this engine (${(result.error ?? '').slice(0, 120)}); retrying fresh + checkpoint context`);
         result = await runOnce(undefined);
       }
+    }
+    if (result.paused) {
+      // TASK_PAUSE satisfied: pin a final checkpoint and reply TASK_PAUSED with
+      // its receipt; the server keeps the dispatch PAUSED for later resume.
+      const pausedCkpt = await uploadCheckpoint(frame, httpBase(config), config.executorToken, {
+        seq: nextSeq++, provider: 'claude-code', providerSessionId: result.sessionId ?? runId, runtimeId: 'awce',
+        activeStepId: String(frame.sdlcStepId),
+        state: { phase: 'paused', attempt: frame.attempt, reason: 'TASK_PAUSE' },
+      });
+      stage(`paused: checkpoint seq=${pausedCkpt.checkpointSeq} pinned`);
+      client.send({ type: 'TASK_PAUSED', dispatchId: frame.dispatchId, checkpointSeq: pausedCkpt.checkpointSeq, checkpointSha256: pausedCkpt.sha256 });
+      return;
     }
 
     // Agent-controlled failure signal: writing artifacts/FAILURE marks the step failed
@@ -212,6 +229,7 @@ async function handleDispatch(client: WsClient, config: AwceConfig, frame: TaskD
     });
   } finally {
     runningDispatches.delete(frame.dispatchId);
+    pauseControllers.delete(frame.dispatchId);
   }
 }
 
@@ -225,6 +243,17 @@ function main(): void {
     {
       onDispatch: (frame) => { void handleDispatch(client, config, frame, log); },
       onFrame: (frame) => {
+        if (frame.type === 'TASK_PAUSE') {
+          const controller = pauseControllers.get(frame.dispatchId);
+          if (controller) {
+            log('info', `[d${frame.dispatchId}] TASK_PAUSE received: aborting engine`);
+            controller.abort();
+          } else {
+            log('warn', `[d${frame.dispatchId}] TASK_PAUSE for a dispatch not running here`);
+            client.send({ type: 'TASK_PAUSE_FAILED', dispatchId: frame.dispatchId, error: 'dispatch not running on this executor' });
+          }
+          return;
+        }
         if (frame.type === 'TASK_HANDOFF_RESULT') {
           log('info', `handoff result d${frame.dispatchId}: status=${frame.status ?? '?'}`
             + `${frame.downstreamDispatchId ? ` downstream=d${frame.downstreamDispatchId}` : ''}`

@@ -248,3 +248,11 @@ attempt 1 强杀（kill -9，检查点 seq=1 已上传）→ 执行器重启（�
 1. **声明容量 ≠ 可用容量**：`ExecutorSelector.capacityLimit` 对非交互（正式 SDLC）派发取 `maxConcurrentDispatches − 1`（为交互/恢复工作预留 1 槽）；`usedCapacity` = 库存表 running ∪ DB 占用 + 会话轮次。要 N 路正式并行须声明 N+1。实测：声明 2 时两工单严格串行（NO_EXECUTOR_CAPACITY），声明 3 后两个派发 44ms 内并发到达、运行重叠。
 2. **awce 并发模型**：单槽 inFlight 布尔改为 runningDispatches 集合池；超声明容量的派发 best-effort 处理（记警告、不丢工作——执行器丢派发没有服务端补偿路径）。
 3. **心跳库存是租约事实源**：服务端 `usedCapacity` 同时参考 DB 占用与最新快照 running 并集——执行器少报会误判容量，多报违反协议（RUNNING_DISPATCH_NOT_OWNED 断连）。
+
+## M11 实测发现：下行控制（TASK_PAUSE）与 package-url 刷新
+
+1. **社区版唯一的下行控制帧是 `TASK_PAUSE`**：`WsDispatchControlTransport.pause()` 下发 `{type:"TASK_PAUSE", dispatchId, executorId}`（会话在线走 WS，否则走 Redis 广播频道）。执行器须停掉引擎、落最后一个检查点，回 `TASK_PAUSED {dispatchId, checkpointSeq, checkpointSha256}`；无法满足则回 `TASK_PAUSE_FAILED {dispatchId, error}`。两者服务端都以 result-ack 确认。`EXECUTOR_RESTART_RESULT`/`EXECUTOR_UPGRADE_RESULT` 等上行 case 存在但其下发属企业控制通道，社区版不触发。
+2. **暂停触发入口**：MCP 工具 `autowonder.pause_dispatch` 需 `workitemId` + `dispatchId` 双参（只给 dispatchId 报“参数不合法”）；`DispatchPauseService.requestPause` 置 PAUSING 并下发帧。执行器回 `TASK_PAUSE_FAILED` 后状态转 `PAUSE_FAILED`。
+3. **awce 暂停实现**：`pauseControllers: Map<dispatchId, AbortController>`；收到 `TASK_PAUSE` 时 abort 对应 run → runner 对子进程发 SIGTERM（5s 后 SIGKILL 兜底）→ 以 `paused:true` 收尾；主流程上传一个 `phase:"paused"` 检查点并回 `TASK_PAUSED`，跳过正常 RESULT。未在本执行器运行的 dispatchId 直接回 `TASK_PAUSE_FAILED`（已实测服务端接受并转 PAUSE_FAILED）。
+4. **预签名 package URL 有 600s TTL**：`DaemonTaskPackageController` 暴露 `POST /api/daemon/dispatches/{id}/package-url?token=<executorToken>` → `{downloadUrl, expiresInSeconds}`；状态不可刷新时 409、鉴权失败 401。awce 下载失败时用帧里的 `packageRefreshPath` 刷新一次再重试，覆盖长队列/慢下载导致的 URL 过期。
+5. **派发帧构建的隐性协议门**：`WsDispatchTransport.buildFrame` 会调 `DispatchMcpTokenService.issue`（为 dispatch 签发 `awdispatch_` JWT）、`checkpointService.descriptor`（续跑描述符）、`modelSelectionService.freeze`（选中模型且执行器未声明 `TASK_MODEL_SELECTION_V1` 时抛 `ExecutorProtocolCompatibilityException`）。这些在 `requireTaskPackageProtocol` 之后、`dispatch urls` 日志之前执行——任一抛出都会让派发在“dispatch sending”后静默失败（异常进 `runPending failed` / 异步 `SimpleAsyncUncaughtExceptionHandler`）。排障时须对照后端 ERROR 栈，而非只看执行器侧无派发到达。

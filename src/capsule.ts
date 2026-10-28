@@ -56,6 +56,8 @@ export async function buildCapsule(
   frame: TaskDispatchFrame,
   workspaceRoot: string,
   log: (message: string) => void,
+  httpBase: string = '',
+  executorToken: string = '',
 ): Promise<Capsule> {
   const root = join(workspaceRoot, String(frame.tenantId), String(frame.workitemId), String(frame.dispatchId), `attempt-${frame.attempt}`);
   const sessionDir = join(workspaceRoot, String(frame.tenantId), String(frame.workitemId), `session-${frame.sdlcStepId}`);
@@ -67,9 +69,25 @@ export async function buildCapsule(
   await mkdir(packageDir, { recursive: true });
   await mkdir(join(artifactsDir, 'deliverables'), { recursive: true });
 
-  // 1. Download.
+  // 1. Download. Presigned URLs expire (10 min TTL) — on failure refresh once
+  //    via the frame-provided packageRefreshPath (same executor-token auth).
   log(`downloading ${frame.size}B package ${frame.packageId}`);
-  const response = await fetch(frame.downloadUrl);
+  let downloadUrl = frame.downloadUrl;
+  let response = await fetch(downloadUrl);
+  if (!response.ok && frame.packageRefreshPath) {
+    log(`download failed (HTTP ${response.status}); refreshing package URL`);
+    const refreshed = await fetch(`${httpBase}${frame.packageRefreshPath}?token=${encodeURIComponent(executorToken)}`, { method: 'POST' });
+    if (refreshed.ok) {
+      const body = await refreshed.json().catch(() => undefined) as { downloadUrl?: string } | undefined;
+      if (typeof body?.downloadUrl === 'string' && body.downloadUrl.length > 0) {
+        downloadUrl = body.downloadUrl;
+        log(`package URL refreshed, retrying`);
+        response = await fetch(downloadUrl);
+      }
+    } else {
+      log(`package URL refresh failed: HTTP ${refreshed.status}`);
+    }
+  }
   if (!response.ok) throw new Error(`package download failed: HTTP ${response.status}`);
   const zipBytes = Buffer.from(await response.arrayBuffer());
   if (zipBytes.length !== frame.size) {
